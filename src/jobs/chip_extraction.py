@@ -7,7 +7,7 @@ from sedona.stac.client import Client
 from pyspark.sql.functions import *
 from ..config.config import CONFIG
 from ..lib.sedona_utils import get_global_chips, create_sedona_session
-from ..lib.raster_utils import process_scene_chips, scene_chips_schema
+from ..lib.raster_utils import process_scene_region, scene_chips_schema
 import boto3
 
 def get_ssm_parameter(name):
@@ -73,15 +73,37 @@ def main():
         scenes_s3.createOrReplaceTempView("scenes")
         
         scene_chip_pairs = spark.sql("""
-            SELECT s.id, s.datetime, c.chip_id, c.geohash,
+            SELECT s.id, s.datetime, c.chip_id, c.geohash, c.region_id,
                    ST_Contains(s.geometry, c.chip_geometry) as is_complete,
-                   c.minx, c.miny, c.maxx, c.maxy
+                   c.minx, c.miny, c.maxx, c.maxy, c.x, c.y
             FROM scenes s
             CROSS JOIN chips c
             WHERE ST_Intersects(s.geometry, c.chip_geometry)
         """)
         
-        # Create raw chips table if not exists
+        # Process chips with 6x6 tiling optimization
+        print("Processing scene-chip pairs with 6x6 tiling...")
+
+        # Add these debug lines to see what's happening:
+        print(f"Unique scenes: {scene_chip_pairs.select('id').distinct().count()}")
+        print(f"Unique regions: {scene_chip_pairs.select('region_id').distinct().count()}")
+        print(f"Scene-region combinations: {scene_chip_pairs.select('id', 'region_id').distinct().count()}")
+
+        
+        # Add region batching to reduce S3 connection overhead
+        scene_chip_pairs_batched = scene_chip_pairs.withColumn(
+            "region_batch", expr("hash(region_id) % 4")
+        ).cache()
+        
+        # Group by scene AND region batch for balanced S3 connection reuse
+        all_chips = scene_chip_pairs_batched.groupBy("id", "datetime", "region_batch").applyInPandas(
+            lambda df: process_scene_region(df, broadcast_urls),
+            scene_chips_schema
+        )
+        
+        all_chips_with_metadata = all_chips.withColumn("created_at", current_timestamp())
+
+        # Create raw chips table with optimized partitioning
         spark.sql(f"""
             CREATE TABLE IF NOT EXISTS sentinel.chips_raw (
                 chip_id STRING,
@@ -93,7 +115,10 @@ def main():
                 created_at TIMESTAMP
             ) USING ICEBERG
             LOCATION '{output_path}'
-            PARTITIONED BY (geohash)
+            PARTITIONED BY (
+                truncate(4, geohash),
+                year(datetime)
+            )
             TBLPROPERTIES (
                 'write.target-file-size-bytes'='134217728',
                 'write.parquet.compression-codec'='zstd',
@@ -104,18 +129,9 @@ def main():
             )
         """)
         
-        # Process chips
-        print("Processing scene-chip pairs...")
-
-        
-        all_chips = scene_chip_pairs.groupBy("id", "datetime").applyInPandas(
-            lambda df: process_scene_chips(df, broadcast_urls),
-            scene_chips_schema
-        )
-        
-        all_chips_with_metadata = all_chips.withColumn("created_at", current_timestamp())
-        
-        all_chips_with_metadata.write.mode("append").insertInto("sentinel.chips_raw")
+        # Pre-sort data by Iceberg sort order before write
+        all_chips_sorted = all_chips_with_metadata.orderBy("geohash", "chip_id", "datetime")
+        all_chips_sorted.write.mode("append").insertInto("sentinel.chips_raw")
         
         chip_count = all_chips_with_metadata.count()
         print(f"Successfully processed {chip_count} chips")

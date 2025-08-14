@@ -75,6 +75,7 @@ class SentinelProcessingStack(Stack):
                     "glue:GetTable",
                     "glue:CreateTable",
                     "glue:UpdateTable",
+                    "glue:DeleteTable",
                     "glue:GetPartitions"
                 ],
                 resources=[

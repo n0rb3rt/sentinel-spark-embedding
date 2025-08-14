@@ -44,7 +44,10 @@ def get_global_chips(spark, aoi_bounds, cell_size=CONFIG.jobs.chip_extraction.ch
             FROM chip_coords
         )
         SELECT *,
-            ST_GeoHash(ST_Centroid(chip_geometry), 6) as geohash
+            ST_GeoHash(ST_Centroid(chip_geometry), 6) as geohash,
+            floor(x / 6) as region_x,
+            floor(y / 6) as region_y,
+            concat('region_', floor(x / 6), '_', floor(y / 6)) as region_id
         FROM chip_geometries
     """)
 
