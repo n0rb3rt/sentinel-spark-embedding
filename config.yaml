@@ -1,0 +1,46 @@
+# Sentinel-2 Processing Configuration
+# Infrastructure/System Configuration
+spark:
+  jars:
+    packages: "org.apache.sedona:sedona-spark-3.5_2.12:1.7.2,org.datasyslab:geotools-wrapper:1.7.2-28.5,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.4.2,org.apache.iceberg:iceberg-aws-bundle:1.4.2"
+    repositories: "https://artifacts.unidata.ucar.edu/repository/unidata-all"
+  sql:
+    catalog:
+      spark_catalog: "org.apache.iceberg.spark.SparkSessionCatalog"
+      "spark_catalog.catalog-impl": "org.apache.iceberg.aws.glue.GlueCatalog"
+
+rasterio:
+  GDAL_CACHEMAX: 512
+  CPL_VSIL_CURL_CACHE_SIZE: 200000000
+  GDAL_HTTP_MULTIPLEX: "YES"
+  GDAL_DISABLE_READDIR_ON_OPEN: "EMPTY_DIR"
+
+# SageMaker Job Infrastructure
+sagemaker:
+  chip_extraction:
+    instance_type: "ml.m5.2xlarge"
+    instance_count: 3
+    volume_size_in_gb: 100
+  temporal_merge:
+    instance_type: "ml.m5.xlarge"
+    instance_count: 2
+    volume_size_in_gb: 50
+  embedding_generation:
+    instance_type: "ml.g4dn.xlarge"
+    instance_count: 2
+    volume_size_in_gb: 100
+
+# Job-Specific Processing Parameters
+jobs:
+  chip_extraction:
+    aoi_bounds: [-61.7573, -10.9065, -61.0926, -10.2531]
+    chip_size_degrees: 0.023
+    chip_size_pixels: 256
+    start_date: "2024-01-15"
+    end_date: "2024-01-18"
+  temporal_merge:
+    lookback_days: 30
+    min_valid_pixels: 128
+  embedding_generation:
+    model_path: "clay/v1.0/model.pth"
+    batch_size: 32
