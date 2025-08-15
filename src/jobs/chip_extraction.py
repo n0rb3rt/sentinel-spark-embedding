@@ -95,7 +95,7 @@ def main():
             ) USING ICEBERG LOCATION '{output_path}'
             PARTITIONED BY (
                 truncate(4, geohash), 
-                year(datetime)
+                month(datetime)
             )
             TBLPROPERTIES (
                 'write.target-file-size-bytes'='134217728',
