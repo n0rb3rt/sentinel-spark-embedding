@@ -34,8 +34,9 @@ sagemaker:
 jobs:
   chip_extraction:
     aoi_bounds: [-61.7573, -10.9065, -61.0926, -10.2531]
-    chip_size_degrees: 0.023
     chip_size_pixels: 256
+    ground_resolution_meters: 10
+    region_size_chips: 12
     start_date: "2024-01-15"
     end_date: "2024-01-18"
   temporal_merge:

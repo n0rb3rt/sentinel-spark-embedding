@@ -7,7 +7,7 @@ from sedona.stac.client import Client
 from pyspark.sql.functions import *
 from ..config.config import CONFIG
 from ..lib.sedona_utils import get_global_chips, create_sedona_session
-from ..lib.raster_utils import process_scene_region, scene_chips_schema
+from ..lib.raster_utils import process_scene_chips, scene_chips_schema
 import boto3
 
 def get_ssm_parameter(name):
@@ -23,118 +23,91 @@ def main():
     start_date = CONFIG.jobs.chip_extraction.start_date
     end_date = CONFIG.jobs.chip_extraction.end_date
     
+    # Sentinel-2 bands to process
+    bands = ['blue', 'green', 'red', 'nir', 'scl']
+    
     # Create Spark session
     spark = create_sedona_session("SentinelChipExtraction")
     
     try:
-        # Query Sentinel-2 scenes
+        # 1. Search for Sentinel-2 scenes
         print(f"Querying scenes for AOI: {aoi_bounds}, dates: {start_date}/{end_date}")
-
         client = Client.open("https://earth-search.aws.element84.com/v1")
         
-        scenes_df = client.search(
+        scenes_raw = client.search(
             collection_id="sentinel-2-l2a",
             bbox=aoi_bounds,
             datetime=[start_date, end_date],
             return_dataframe=True
-        ).select("id", "datetime", "grid:code", "geometry", "assets")
+        ).select("id", "datetime", "geometry", "assets")
         
-        # Convert HTTPS URLs to S3 paths
-        scenes_s3 = scenes_df.select(
-            "id", "datetime", "geometry",
-            *[
-                regexp_replace(
-                    col(f"assets.{band}.href"), 
-                    "https://sentinel-cogs.s3.us-west-2.amazonaws.com", 
-                    "s3://sentinel-cogs"
-                ).alias(f"{band}_s3") 
-              for band in ['blue', 'green', 'red', 'nir', 'scl']
-            ]
+        print(f"Found {scenes_raw.count()} scenes")
+        
+        # 2. Prepare raw scene data
+        scenes_s3 = scenes_raw.select(
+            "id",
+            "datetime", 
+            "geometry",
+            *[regexp_replace(col(f"assets.{band}.href"), 
+                           "https://sentinel-cogs.s3.us-west-2.amazonaws.com", 
+                           "s3://sentinel-cogs").alias(f"{band}_s3") 
+              for band in bands]
         ).repartition("id", "datetime").cache()
-
-        print(f"Found {scenes_df.count()} scenes")
         
-        # Create URL lookup for broadcast
-        scene_urls = scenes_s3.select("id", "datetime", "blue_s3", "green_s3", 
-                                     "red_s3", "nir_s3", "scl_s3").collect()
-        
+        # Broadcast scene URLs for UDF
         url_lookup = {(row['id'], str(row['datetime'])): {
-            'blue_s3': row['blue_s3'],
-            'green_s3': row['green_s3'], 
-            'red_s3': row['red_s3'],
-            'nir_s3': row['nir_s3'],
-            'scl_s3': row['scl_s3']
-        } for row in scene_urls}
-
+            f'{band}_s3': row[f'{band}_s3'] for band in bands
+        } for row in scenes_s3.select("id", "datetime", *[f"{band}_s3" for band in bands]).collect()}
+        
         broadcast_urls = spark.sparkContext.broadcast(url_lookup)
         
-        # Generate chips and create scene-chip pairs
-        get_global_chips(spark, aoi_bounds).createOrReplaceTempView("chips")
-        scenes_s3.createOrReplaceTempView("scenes")
+        # 3. Join scenes with chip grid
+        chips_df = get_global_chips(spark, aoi_bounds)
         
-        scene_chip_pairs = spark.sql("""
-            SELECT s.id, s.datetime, c.chip_id, c.geohash, c.region_id,
-                   ST_Contains(s.geometry, c.chip_geometry) as is_complete,
-                   c.minx, c.miny, c.maxx, c.maxy, c.x, c.y
-            FROM scenes s
-            CROSS JOIN chips c
-            WHERE ST_Intersects(s.geometry, c.chip_geometry)
-        """)
+        scene_chip_pairs = scenes_s3.crossJoin(chips_df) \
+            .filter(expr("ST_Intersects(geometry, chip_geometry)")) \
+            .withColumn("is_complete", expr("ST_Contains(geometry, chip_geometry)")) \
+            .drop("geometry", "chip_geometry")
         
-        # Process chips with 6x6 tiling optimization
-        print("Processing scene-chip pairs with 6x6 tiling...")
-
-        # Add these debug lines to see what's happening:
-        print(f"Unique scenes: {scene_chip_pairs.select('id').distinct().count()}")
-        print(f"Unique regions: {scene_chip_pairs.select('region_id').distinct().count()}")
-        print(f"Scene-region combinations: {scene_chip_pairs.select('id', 'region_id').distinct().count()}")
-
-        
-        # Add region batching to reduce S3 connection overhead
-        scene_chip_pairs_batched = scene_chip_pairs.withColumn(
-            "region_batch", expr("hash(region_id) % 4")
-        ).cache()
-        
-        # Group by scene AND region batch for balanced S3 connection reuse
-        all_chips = scene_chip_pairs_batched.groupBy("id", "datetime", "region_batch").applyInPandas(
-            lambda df: process_scene_region(df, broadcast_urls),
+        # 4. Process chips with UDF
+        print("Processing scene-chip pairs...")
+        all_chips = scene_chip_pairs.groupBy("id", "datetime", "region_id").applyInPandas(
+            lambda df: process_scene_chips(df, broadcast_urls),
             scene_chips_schema
         )
         
-        all_chips_with_metadata = all_chips.withColumn("created_at", current_timestamp())
-
-        # Create raw chips table with optimized partitioning
+        # 5. Optimize for Iceberg write
+        processed_chips = all_chips \
+            .repartition(expr("substring(geohash, 1, 4)")) \
+            .sortWithinPartitions("geohash", "chip_id", "datetime") \
+            .withColumn("created_at", current_timestamp())
+        
+        # 6. Create Iceberg table
         spark.sql(f"""
             CREATE TABLE IF NOT EXISTS sentinel.chips_raw (
-                chip_id STRING,
-                datetime TIMESTAMP,
+                chip_id STRING, 
+                datetime TIMESTAMP, 
                 chip_raster BINARY,
-                is_complete BOOLEAN,
-                cloud_coverage FLOAT,
+                is_complete BOOLEAN, 
+                cloud_coverage FLOAT, 
                 geohash STRING,
                 created_at TIMESTAMP
-            ) USING ICEBERG
-            LOCATION '{output_path}'
+            ) USING ICEBERG LOCATION '{output_path}'
             PARTITIONED BY (
-                truncate(4, geohash),
+                truncate(4, geohash), 
                 year(datetime)
             )
             TBLPROPERTIES (
                 'write.target-file-size-bytes'='134217728',
                 'write.parquet.compression-codec'='zstd',
-                'write.metadata.delete-after-commit.enabled'='true',
-                'write.metadata.previous-versions-max'='5',
-                'write.distribution-mode'='hash',
                 'write.sort-order'='geohash,chip_id,datetime'
             )
         """)
         
-        # Pre-sort data by Iceberg sort order before write
-        all_chips_sorted = all_chips_with_metadata.orderBy("geohash", "chip_id", "datetime")
-        all_chips_sorted.write.mode("append").insertInto("sentinel.chips_raw")
+        # 7. Write to Iceberg table
+        processed_chips.write.mode("append").insertInto("sentinel.chips_raw")
         
-        chip_count = all_chips_with_metadata.count()
-        print(f"Successfully processed {chip_count} chips")
+        print(f"Successfully processed chips")
         
     finally:
         spark.stop()

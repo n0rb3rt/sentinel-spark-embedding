@@ -15,8 +15,13 @@ def create_sedona_session(app_name="SentinelProcessing"):
         .getOrCreate()
     return SedonaContext.create(spark_session)
 
-def get_global_chips(spark, aoi_bounds, cell_size=CONFIG.jobs.chip_extraction.chip_size_degrees):
-    """Generate global 256px grid chips using Sedona SQL"""
+def get_global_chips(spark, aoi_bounds):
+    """Generate global grid chips using Sedona SQL with pre-calculated tile bounds"""
+    from .raster_utils import get_chip_size_degrees
+    cell_size = get_chip_size_degrees()
+    region_size = int(CONFIG.jobs.chip_extraction.region_size_chips)
+    chip_pixels = int(CONFIG.jobs.chip_extraction.chip_size_pixels)
+    
     return spark.sql(f"""
         WITH chip_coords AS (
             SELECT 
@@ -45,9 +50,15 @@ def get_global_chips(spark, aoi_bounds, cell_size=CONFIG.jobs.chip_extraction.ch
         )
         SELECT *,
             ST_GeoHash(ST_Centroid(chip_geometry), 6) as geohash,
-            floor(x / 6) as region_x,
-            floor(y / 6) as region_y,
-            concat('region_', floor(x / 6), '_', floor(y / 6)) as region_id
+            concat('region_', floor(x / {region_size}), '_', floor(y / {region_size})) as region_id,
+            -- Pre-calculate region bounds for UDF optimization
+            CAST(-180 + (floor(x / {region_size}) * {region_size} * {cell_size}) AS DOUBLE) as region_minx,
+            CAST(-90 + (floor(y / {region_size}) * {region_size} * {cell_size}) AS DOUBLE) as region_miny,
+            CAST(-180 + ((floor(x / {region_size}) + 1) * {region_size} * {cell_size}) AS DOUBLE) as region_maxx,
+            CAST(-90 + ((floor(y / {region_size}) + 1) * {region_size} * {cell_size}) AS DOUBLE) as region_maxy,
+            -- Pre-calculate chip position within region
+            CAST((x % {region_size}) * {chip_pixels} AS INT) as chip_start_x,
+            CAST((y % {region_size}) * {chip_pixels} AS INT) as chip_start_y
         FROM chip_geometries
     """)
 
