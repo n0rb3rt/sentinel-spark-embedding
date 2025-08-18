@@ -22,9 +22,7 @@ def main():
     output_path = f's3://{bucket_name}/data/sentinel/'
     start_date = CONFIG.jobs.chip_extraction.start_date
     end_date = CONFIG.jobs.chip_extraction.end_date
-    
-    # Sentinel-2 bands to process
-    bands = ['blue', 'green', 'red', 'nir', 'scl']
+    bands = CONFIG.sentinel.bands
     
     # Create Spark session
     spark = create_sedona_session("SentinelChipExtraction")
@@ -69,6 +67,8 @@ def main():
             .withColumn("is_complete", expr("ST_Contains(geometry, chip_geometry)")) \
             .drop("geometry", "chip_geometry")
         
+        print(f"Found {scene_chip_pairs.count()} chips")
+        
         # 4. Process chips with UDF
         print("Processing scene-chip pairs...")
         all_chips = scene_chip_pairs.groupBy("id", "datetime", "region_id").applyInPandas(
@@ -78,7 +78,6 @@ def main():
         
         # 5. Optimize for Iceberg write
         processed_chips = all_chips \
-            .repartition(expr("substring(geohash, 1, 4)")) \
             .sortWithinPartitions("geohash", "chip_id", "datetime") \
             .withColumn("created_at", current_timestamp())
         

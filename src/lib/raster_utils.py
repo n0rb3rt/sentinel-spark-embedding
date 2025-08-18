@@ -6,31 +6,31 @@ from rasterio.transform import from_bounds
 from io import BytesIO
 import pandas as pd
 from pyspark.sql.types import *
-from pyspark.sql.functions import pandas_udf, PandasUDFType
 from ..config.config import CONFIG
+from contextlib import ExitStack
+
+BANDS = CONFIG.sentinel.bands
+CHIP_PIXELS = CONFIG.jobs.chip_extraction.chip_size_pixels
+REGION_SIZE = CONFIG.jobs.chip_extraction.region_size_chips
+GROUND_RESOLUTION_METERS = CONFIG.jobs.chip_extraction.ground_resolution_meters
 
 def get_chip_size_degrees():
     """Calculate chip size in degrees from pixel size and ground resolution"""
-    pixels = CONFIG.jobs.chip_extraction.chip_size_pixels
-    meters_per_pixel = CONFIG.jobs.chip_extraction.ground_resolution_meters
     meters_per_degree = 111320  # approximate at equator
-    
-    chip_size_meters = pixels * meters_per_pixel
+    chip_size_meters = CHIP_PIXELS * GROUND_RESOLUTION_METERS
     return chip_size_meters / meters_per_degree
 
-def create_multiband_geotiff(bands_dict, transform, crs='EPSG:4326'):
-    """Create multiband GeoTIFF from band dictionary"""
+def create_multiband_geotiff(band_views, transform, crs='EPSG:4326'):
+    """Create multiband GeoTIFF from band views without copying data"""
     buffer = BytesIO()
-    chip_pixels = CONFIG.jobs.chip_extraction.chip_size_pixels
     
     with rasterio.open(buffer, 'w', driver='GTiff', compress='lz4',
-                      height=chip_pixels, width=chip_pixels, count=len(bands_dict),
-                      dtype=list(bands_dict.values())[0].dtype,
+                      height=CHIP_PIXELS, width=CHIP_PIXELS, count=len(band_views),
+                      dtype=band_views[0].dtype,
                       crs=crs, transform=transform) as dst:
         
-        for i, (name, band) in enumerate(bands_dict.items(), 1):
-            dst.write(band, i)
-            dst.set_band_description(i, name)
+        for i, band_view in enumerate(band_views, 1):
+            dst.write(band_view, i)
     
     return buffer.getvalue()
 
@@ -74,59 +74,45 @@ def process_scene_chips(df, broadcast_urls) -> pd.DataFrame:
         return pd.DataFrame()
     
     results = []
-    region_size = CONFIG.jobs.chip_extraction.region_size_chips
-    chip_pixels = CONFIG.jobs.chip_extraction.chip_size_pixels
-    tile_pixels = region_size * chip_pixels
+    tile_pixels = REGION_SIZE * CHIP_PIXELS
     
     with rasterio.Env(**CONFIG.rasterio):
-        # One connection per region
-        with rasterio.open(urls['blue_s3']) as blue_src, \
-             rasterio.open(urls['green_s3']) as green_src, \
-             rasterio.open(urls['red_s3']) as red_src, \
-             rasterio.open(urls['nir_s3']) as nir_src, \
-             rasterio.open(urls['scl_s3']) as scl_src:
+        with ExitStack() as stack:
+            sources = [stack.enter_context(rasterio.open(urls[f'{band}_s3'])) for band in BANDS]
             
-            print(f"Processing {len(df)} chips in region {region_id} for scene {scene_id}")
+            print(f"Processing {len(df)} chips in region {region_id} for scene {scene_id} at {datetime_str}")
             
             try:
-                # Use pre-calculated region bounds from upstream SQL
-                region_minx = df.iloc[0]['region_minx']
-                region_miny = df.iloc[0]['region_miny']
-                region_maxx = df.iloc[0]['region_maxx']
-                region_maxy = df.iloc[0]['region_maxy']
+                # Get region bounds and read all bands
+                region_bounds = (df.iloc[0]['region_minx'], df.iloc[0]['region_miny'], 
+                               df.iloc[0]['region_maxx'], df.iloc[0]['region_maxy'])
                 
-                # Read entire region from all bands
-                region_bands = {
-                    'blue': extract_reprojected_chip(blue_src, (region_minx, region_miny, region_maxx, region_maxy), tile_pixels),
-                    'green': extract_reprojected_chip(green_src, (region_minx, region_miny, region_maxx, region_maxy), tile_pixels),
-                    'red': extract_reprojected_chip(red_src, (region_minx, region_miny, region_maxx, region_maxy), tile_pixels),
-                    'nir': extract_reprojected_chip(nir_src, (region_minx, region_miny, region_maxx, region_maxy), tile_pixels),
-                    'scl': extract_reprojected_chip(scl_src, (region_minx, region_miny, region_maxx, region_maxy), tile_pixels)
-                }
+                region_data = [extract_reprojected_chip(src, region_bounds, tile_pixels) for src in sources]
                 
-                # Extract individual chips from the region
+                # Extract individual chips using views (no copies)
                 for _, chip in df.iterrows():
-                    # Use pre-calculated chip positions from upstream SQL
-                    chip_start_x = int(chip['chip_start_x'])
-                    chip_start_y = int(chip['chip_start_y'])
+                    x, y = int(chip['chip_start_x']), int(chip['chip_start_y'])
                     
-                    chip_bands = {
-                        band: data[chip_start_y:chip_start_y+chip_pixels, chip_start_x:chip_start_x+chip_pixels]
-                        for band, data in region_bands.items()
-                    }
+                    # Create views for all bands
+                    band_views = [data[y:y+CHIP_PIXELS, x:x+CHIP_PIXELS] for data in region_data]
                     
-                    # Create individual chip GeoTIFF
+                    # Create GeoTIFF directly from views
                     chip_bounds = (float(chip['minx']), float(chip['miny']), 
                                  float(chip['maxx']), float(chip['maxy']))
-                    chip_transform = from_bounds(*chip_bounds, chip_pixels, chip_pixels)
-                    chip_raster = create_multiband_geotiff(chip_bands, chip_transform)
+                    chip_transform = from_bounds(*chip_bounds, CHIP_PIXELS, CHIP_PIXELS)
+                    chip_raster = create_multiband_geotiff(band_views, chip_transform)
+                    
+                    # Calculate cloud coverage from SCL view
+                    scl_index = BANDS.index('scl')
+                    scl_view = band_views[scl_index]
+                    cloud_coverage = float(scl_view[scl_view > 0].mean()) if scl_view[scl_view > 0].size > 0 else 0.0
                     
                     results.append({
                         'chip_id': chip['chip_id'],
                         'datetime': chip['datetime'],
                         'chip_raster': chip_raster,
                         'is_complete': chip['is_complete'],
-                        'cloud_coverage': float(chip_bands['scl'][chip_bands['scl'] > 0].mean()) if chip_bands['scl'][chip_bands['scl'] > 0].size > 0 else 0.0,
+                        'cloud_coverage': cloud_coverage,
                         'geohash': chip['geohash']
                     })
                     

@@ -30,6 +30,10 @@ sagemaker:
     instance_count: 2
     volume_size_in_gb: 100
 
+# Sentinel-2 Data Configuration
+sentinel:
+  bands: ["blue", "green", "red", "nir", "scl"]
+
 # Job-Specific Processing Parameters
 jobs:
   chip_extraction:
