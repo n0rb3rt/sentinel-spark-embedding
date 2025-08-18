@@ -7,7 +7,7 @@ from sedona.stac.client import Client
 from pyspark.sql.functions import *
 from ..config.config import CONFIG
 from ..lib.sedona_utils import get_global_chips, create_sedona_session
-from ..lib.raster_utils import process_scene_chips, scene_chips_schema
+from ..lib.raster_utils import SceneChipProcessor
 import boto3
 
 def get_ssm_parameter(name):
@@ -72,8 +72,8 @@ def main():
         # 4. Process chips with UDF
         print("Processing scene-chip pairs...")
         all_chips = scene_chip_pairs.groupBy("id", "datetime", "region_id").applyInPandas(
-            lambda df: process_scene_chips(df, broadcast_urls),
-            scene_chips_schema
+            lambda df: SceneChipProcessor.process(df, broadcast_urls),
+            SceneChipProcessor.schema
         )
         
         # 5. Optimize for Iceberg write
