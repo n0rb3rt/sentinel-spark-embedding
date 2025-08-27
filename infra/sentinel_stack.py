@@ -8,12 +8,11 @@ from aws_cdk import (
     aws_s3_deployment as s3deploy,
     aws_iam as iam,
     aws_glue as glue,
-    aws_ecr as ecr,
     aws_ecr_assets as ecr_assets,
     aws_ssm as ssm,
-    aws_lakeformation as lakeformation,
     RemovalPolicy
 )
+from aws_cdk.aws_lakeformation import CfnPermissions as LF
 from constructs import Construct
 
 class SentinelProcessingStack(Stack):
@@ -33,7 +32,7 @@ class SentinelProcessingStack(Stack):
             self, "SageMakerProcessingRole",
             assumed_by=iam.CompositePrincipal(
                 iam.ServicePrincipal("sagemaker.amazonaws.com"),
-                iam.ArnPrincipal(f"arn:aws:iam::{self.account}:user/admin")
+                iam.ArnPrincipal(f"arn:aws:iam::{self.account}:role/Admin")
             ),
             managed_policies=[
                 iam.ManagedPolicy.from_aws_managed_policy_name("AmazonSageMakerFullAccess")
@@ -51,18 +50,38 @@ class SentinelProcessingStack(Stack):
             }
         )
         
-        # Glue Database (IAM-only, no Lake Formation)
+        # Glue Database
         self.glue_database = glue.CfnDatabase(
             self, "SentinelGlueDatabase",
             catalog_id=self.account,
             database_input=glue.CfnDatabase.DatabaseInputProperty(
                 name="sentinel",
-                description="Sentinel-2 chip processing database",
-                parameters={
-                    "UseOnlyIAMAccess": "true"
-                }
+                description="Sentinel-2 chip processing database"
             )
         )
+        
+        # Lake Formation permissions
+        database_resource = LF.ResourceProperty(database_resource=LF.DatabaseResourceProperty(name="sentinel"))
+        table_resource = LF.ResourceProperty(table_resource=LF.TableResourceProperty(database_name="sentinel", table_wildcard={}))
+        
+        admin_principal = LF.DataLakePrincipalProperty(data_lake_principal_identifier=f"arn:aws:iam::{self.account}:role/Admin")
+        sagemaker_principal = LF.DataLakePrincipalProperty(data_lake_principal_identifier=self.sagemaker_role.role_arn)
+        
+        admin_db_perms = LF(self, "AdminDatabasePermissions",
+            data_lake_principal=admin_principal, resource=database_resource, permissions=["ALL"])
+        admin_table_perms = LF(self, "AdminTablePermissions", 
+            data_lake_principal=admin_principal, resource=table_resource, permissions=["ALL"])
+        
+        sagemaker_db_perms = LF(self, "SageMakerDatabasePermissions",
+            data_lake_principal=sagemaker_principal, resource=database_resource, permissions=["ALL"])
+        sagemaker_table_perms = LF(self, "SageMakerTablePermissions",
+            data_lake_principal=sagemaker_principal, resource=table_resource, permissions=["ALL"])
+        
+        # Ensure permissions are created after database
+        admin_db_perms.add_dependency(self.glue_database)
+        admin_table_perms.add_dependency(admin_db_perms)
+        sagemaker_db_perms.add_dependency(self.glue_database)
+        sagemaker_table_perms.add_dependency(sagemaker_db_perms)
         
         # Add S3 permissions
         self.bucket.grant_read_write(self.sagemaker_role)
@@ -153,15 +172,3 @@ class SentinelProcessingStack(Stack):
             destination_key_prefix="airflow/dags"
         )
         
-        # Grant Lake Formation permissions to SageMaker role
-        lakeformation.CfnPermissions(self, "SageMakerDatabasePermissions",
-            data_lake_principal=lakeformation.CfnPermissions.DataLakePrincipalProperty(
-                data_lake_principal_identifier=self.sagemaker_role.role_arn
-            ),
-            resource=lakeformation.CfnPermissions.ResourceProperty(
-                database_resource=lakeformation.CfnPermissions.DatabaseResourceProperty(
-                    name="sentinel"
-                )
-            ),
-            permissions=["CREATE_TABLE", "ALTER", "DROP"]
-        )

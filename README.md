@@ -24,63 +24,39 @@ Production pipeline for processing Sentinel-2 satellite imagery into 256px chips
 
 ## Quick Start
 
-1. **Setup CDK Environment**:
+1. **Setup dev environment**:
    ```bash
-   cd infrastructure/cdk
-   pip install -r requirements.txt
-   cd ../..
+   git clone git@ssh.gitlab.aws.dev:jnmeehan/sentinel-spark-embedding.git
+   cd sentinel-spark-embedding/
+   brew install python@3.12
+   python3.12 -m venv .venv
+   source .venv/bin/activate
+   export JAVA_HOME=$(/usr/libexec/java_home -v 1.8)
    ```
 
-2. **Deploy Everything**:
+2. **Deploy CDK infrastructure**:
    ```bash
-   ./deploy.sh
+   CDK_EXEC_ROLE=$(aws cloudformation list-stack-resources \
+     --stack-name CDKToolkit \
+     --query 'StackResourceSummaries[?ResourceType==`AWS::IAM::Role` && contains(LogicalResourceId, `CloudFormationExecutionRole`)].PhysicalResourceId' \
+     --output text)
+   
+   aws lakeformation put-data-lake-settings \
+     --data-lake-settings "{\"DataLakeAdmins\":[{\"DataLakePrincipalIdentifier\":\"$CDK_EXEC_ROLE\"}]}"
+   
+   cdk deploy
    ```
 
-3. **Upload Clay Model**:
+3. **Run a job**:
    ```bash
-   BUCKET=$(aws ssm get-parameter --name '/airflow/variables/bucket_name' --query 'Parameter.Value' --output text)
-   aws s3 cp clay_model.pth s3://$BUCKET/models/clay/v1.0/model.pth
+   python -m src.jobs.chip_extraction \
+     jobs.chip_extraction.aoi_bounds='[-122.5,-37.8,-122.3,-37.7]' \
+     jobs.chip_extraction.start_date=2024-01-01 \
+     jobs.chip_extraction.end_date=2024-01-31
    ```
-
-4. **Deploy DAG to Airflow**:
-   - Download from S3: `s3://bucket/airflow/dags/sentinel_processing_dag.py`
-   - Upload to your Airflow environment
-   - Enable the DAG in Airflow UI
-
-Configuration is automatically stored in SSM Parameter Store and read by Airflow at runtime.
-
-## Running Jobs
-
-**Via Airflow UI**: Enable and trigger the `sentinel_chip_processing` DAG
-
-**Individual Jobs** (for testing):
-```bash
-# Install dev dependencies first
-pip install -r requirements-dev.txt
-
-# Run jobs
-python scripts/run_job.py chip_extraction --start-date 2024-01-15 --end-date 2024-01-16
-python scripts/run_job.py temporal_merge
-python scripts/run_job.py embedding_generation
-```
-
-## Development Workflow
-
-**Code Changes**: Just run `./deploy.sh` - it rebuilds container and redeploys code
-
-**Infrastructure Changes**: Modify CDK stack and run `./deploy.sh`
-
-**Dependency Changes**: Update `docker/requirements.txt` and run `./deploy.sh`
 
 ## Processing Pipeline
 
 1. **Chip Extraction**: Query STAC → intersect with global grid → extract 256px chips
 2. **Temporal Merge**: Fill incomplete chips with previous data for consistency
 3. **Embedding Generation**: Generate Clay GeoFM embeddings for change detection
-
-## Key Features
-
-- **Geohash Partitioning**: Level 8 for data, Level 4 for partitioning
-- **Temporal Gap Filling**: Ensures consistent chip coverage over time
-- **Serverless Execution**: SageMaker PySparkProcessor with auto-scaling
-- **Iceberg Storage**: ACID transactions and schema evolution
