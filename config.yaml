@@ -54,3 +54,5 @@ jobs:
   embedding_generation:
     model_path: "clay/v1.0/model.pth"
     batch_size: 32
+    max_cloud_cover: 0.3
+    bands: ["red", "green", "blue", "nir"]

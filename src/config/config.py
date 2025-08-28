@@ -3,6 +3,13 @@ Configuration for Sentinel processing jobs using OmegaConf
 """
 from omegaconf import OmegaConf
 from pathlib import Path
+import yaml
+
+def load_clay_metadata():
+    """Load Clay model metadata"""
+    metadata_path = Path(__file__).parent.parent.parent / "metadata.yaml"
+    with open(metadata_path) as f:
+        return OmegaConf.create(yaml.safe_load(f))
 
 def load_config():
     """Load config with CLI overrides"""
@@ -30,8 +37,9 @@ def _flatten_config(config, prefix="spark"):
             items.append((f"{prefix}.{key}", str(value)))
     return items
 
-# Global config instance
+# Global config instances
 CONFIG = load_config()
+CLAY_METADATA = load_clay_metadata()
 
 # Replace nested spark config with flattened version
 CONFIG.spark = dict(_flatten_config(CONFIG.spark))

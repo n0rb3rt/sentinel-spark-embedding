@@ -5,7 +5,7 @@ Extracts 256px chips from Sentinel-2 scenes with geohash partitioning
 """
 from sedona.stac.client import Client
 from pyspark.sql.functions import *
-from ..config.config import CONFIG
+from ..config.config import CONFIG, CLAY_METADATA
 from ..lib.sedona_utils import get_global_chips, create_sedona_session
 from ..lib.raster_utils import SceneChipProcessor
 import boto3
@@ -23,7 +23,8 @@ def main():
     start_date = CONFIG.jobs.chip_extraction.start_date
     end_date = CONFIG.jobs.chip_extraction.end_date
     bands = CONFIG.sentinel.bands
-    
+    band_meta = CLAY_METADATA['sentinel-2-l2a'].bands
+
     # Create Spark session
     spark = create_sedona_session("SentinelChipExtraction")
     
@@ -41,21 +42,21 @@ def main():
         
         print(f"Found {scenes_raw.count()} scenes")
         
-        # 2. Prepare raw scene data
+        # 2. Prepare raw scene data with explicit naming
         scenes_s3 = scenes_raw.select(
-            "id",
+            col("id").alias("scene_id"),
             "datetime", 
-            "geometry",
+            col("geometry").alias("scene_geom"),
             *[regexp_replace(col(f"assets.{band}.href"), 
                            "https://sentinel-cogs.s3.us-west-2.amazonaws.com", 
                            "s3://sentinel-cogs").alias(f"{band}_s3") 
               for band in bands]
-        ).repartition("id", "datetime").cache()
+        ).repartition("scene_id", "datetime").cache()
         
         # Broadcast scene URLs for UDF
-        url_lookup = {(row['id'], str(row['datetime'])): {
+        url_lookup = {(row['scene_id'], str(row['datetime'])): {
             f'{band}_s3': row[f'{band}_s3'] for band in bands
-        } for row in scenes_s3.select("id", "datetime", *[f"{band}_s3" for band in bands]).collect()}
+        } for row in scenes_s3.select("scene_id", "datetime", *[f"{band}_s3" for band in bands]).collect()}
         
         broadcast_urls = spark.sparkContext.broadcast(url_lookup)
         
@@ -63,48 +64,37 @@ def main():
         chips_df = get_global_chips(spark, aoi_bounds)
         
         scene_chip_pairs = scenes_s3.crossJoin(chips_df) \
-            .filter(expr("ST_Intersects(geometry, chip_geometry)")) \
-            .withColumn("is_complete", expr("ST_Contains(geometry, chip_geometry)")) \
-            .drop("geometry", "chip_geometry")
+            .filter(expr("ST_Intersects(scene_geom, chip_geometry)")) \
+            .withColumn("is_complete", expr("ST_Contains(scene_geom, chip_geometry)")) \
+            .drop("scene_geom", "chip_geometry")
         
         print(f"Found {scene_chip_pairs.count()} chips")
         
-        # 4. Process chips with UDF
+        # 4. Process chips with Clay normalization in UDF
         print("Processing scene-chip pairs...")
-        all_chips = scene_chip_pairs.groupBy("id", "datetime", "region_id").applyInPandas(
+        normalized_chips = scene_chip_pairs.groupBy("scene_id", "datetime", "region_id").applyInPandas(
             lambda df: SceneChipProcessor.process(df, broadcast_urls),
             SceneChipProcessor.schema
-        )
+        ).sortWithinPartitions("geohash", "id", "datetime") \
+         .withColumn("created_at", current_timestamp())
         
-        # 5. Optimize for Iceberg write
-        processed_chips = all_chips \
-            .sortWithinPartitions("geohash", "chip_id", "datetime") \
-            .withColumn("created_at", current_timestamp())
-        
-        # 6. Create Iceberg table
+        # Create table with partition transforms using SQL
+        schema_ddl = normalized_chips._jdf.schema().toDDL()
         spark.sql(f"""
-            CREATE TABLE IF NOT EXISTS sentinel.chips_raw (
-                chip_id STRING, 
-                datetime TIMESTAMP, 
-                chip_raster BINARY,
-                is_complete BOOLEAN, 
-                cloud_coverage FLOAT, 
-                geohash STRING,
-                created_at TIMESTAMP
-            ) USING ICEBERG LOCATION '{output_path}'
-            PARTITIONED BY (
-                truncate(4, geohash), 
-                month(datetime)
-            )
+            CREATE OR REPLACE TABLE sentinel.normalized_chips (
+                {schema_ddl}
+            ) USING iceberg
+            PARTITIONED BY (truncate(geohash, 4), month(datetime))
+            LOCATION '{output_path}'
             TBLPROPERTIES (
                 'write.target-file-size-bytes'='134217728',
                 'write.parquet.compression-codec'='zstd',
-                'write.sort-order'='geohash,chip_id,datetime'
+                'write.sort-order'='geohash,id,datetime'
             )
         """)
         
-        # 7. Write to Iceberg table
-        processed_chips.write.mode("append").insertInto("sentinel.chips_raw")
+        # Write to Iceberg table
+        normalized_chips.writeTo("sentinel.normalized_chips").append()
         
         print(f"Successfully processed chips")
         

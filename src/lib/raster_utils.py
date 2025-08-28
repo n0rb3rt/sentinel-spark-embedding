@@ -6,7 +6,7 @@ from rasterio.transform import from_bounds
 from io import BytesIO
 import pandas as pd
 from pyspark.sql.types import *
-from ..config.config import CONFIG
+from ..config.config import CONFIG, CLAY_METADATA
 from contextlib import ExitStack
 
 BANDS = CONFIG.sentinel.bands
@@ -24,22 +24,34 @@ class SceneChipProcessor:
     """Processes scene chips with encapsulated schema and logic"""
     
     schema = StructType([
-        StructField("chip_id", StringType()),
+        StructField("id", StringType()),
         StructField("datetime", TimestampType()),
-        StructField("chip_raster", BinaryType()),
-        StructField("is_complete", BooleanType()),
-        StructField("cloud_coverage", FloatType()),
-        StructField("geohash", StringType())
+        StructField("scene_id", StringType()),
+        StructField("geohash", StringType()),
+        StructField("normalized_raster", BinaryType()),
+        StructField("lat", DoubleType()),
+        StructField("lon", DoubleType()),
+        StructField("week_sin", DoubleType()),
+        StructField("week_cos", DoubleType()),
+        StructField("hour_sin", DoubleType()),
+        StructField("hour_cos", DoubleType()),
+        StructField("lat_sin", DoubleType()),
+        StructField("lat_cos", DoubleType()),
+        StructField("lon_sin", DoubleType()),
+        StructField("lon_cos", DoubleType())
     ])
     
     @staticmethod
-    def _create_multiband_geotiff(band_views, transform, crs='EPSG:4326'):
+    def _create_multiband_geotiff(band_views, transform, crs='EPSG:4326', dtype=None):
         """Create multiband GeoTIFF from band views without copying data"""
         buffer = BytesIO()
         
+        if dtype is None:
+            dtype = band_views[0].dtype
+        
         with rasterio.open(buffer, 'w', driver='GTiff', compress='lz4',
                           height=CHIP_PIXELS, width=CHIP_PIXELS, count=len(band_views),
-                          dtype=band_views[0].dtype,
+                          dtype=dtype,
                           crs=crs, transform=transform) as dst:
             
             for i, band_view in enumerate(band_views, 1):
@@ -67,11 +79,11 @@ class SceneChipProcessor:
     
     @staticmethod
     def process(df, broadcast_urls) -> pd.DataFrame:
-        """Process chips for a scene region using configurable tiling optimization"""
+        """Process chips with Clay normalization and temporal encoding"""
         if df.empty:
             return pd.DataFrame()
             
-        scene_id = df.iloc[0]['id']
+        scene_id = df.iloc[0]['scene_id']
         datetime_str = str(df.iloc[0]['datetime'])
         region_id = df.iloc[0]['region_id']
         urls = broadcast_urls.value.get((scene_id, datetime_str))
@@ -82,43 +94,67 @@ class SceneChipProcessor:
         results = []
         tile_pixels = REGION_SIZE * CHIP_PIXELS
         
+        # Clay normalization constants for first 4 bands
+        s2_bands = CLAY_METADATA['sentinel-2-l2a'].bands
+        band_means = [s2_bands.mean.blue, s2_bands.mean.green, s2_bands.mean.red, s2_bands.mean.nir]
+        band_stds = [s2_bands.std.blue, s2_bands.std.green, s2_bands.std.red, s2_bands.std.nir]
+        
         with rasterio.Env(**CONFIG.rasterio):
             with ExitStack() as stack:
-                sources = [stack.enter_context(rasterio.open(urls[f'{band}_s3'])) for band in BANDS]
+                # Only process first 4 bands for Clay
+                sources = [stack.enter_context(rasterio.open(urls[f'{band}_s3'])) for band in BANDS[:4]]
                 
                 print(f"Processing {len(df)} chips in region {region_id} for scene {scene_id} at {datetime_str}")
                 
                 try:
-                    # Get region bounds and read all bands
                     region_bounds = (df.iloc[0]['region_minx'], df.iloc[0]['region_miny'], 
                                    df.iloc[0]['region_maxx'], df.iloc[0]['region_maxy'])
                     
-                    region_data = [SceneChipProcessor._extract_reprojected_chip(src, region_bounds, tile_pixels) for src in sources]
+                    # Read all bands into 3D array
+                    region_array = np.empty((4, tile_pixels, tile_pixels), dtype=np.uint16)
+                    for i, src in enumerate(sources):
+                        region_array[i] = SceneChipProcessor._extract_reprojected_chip(src, region_bounds, tile_pixels)
                     
-                    # Extract individual chips using views (no copies)
+                    # Normalize entire region with Clay constants
+                    normalized_region = np.empty((4, tile_pixels, tile_pixels), dtype=np.float32)
+                    for i in range(4):
+                        normalized_region[i] = (region_array[i] / 10000.0 - band_means[i]) / band_stds[i]
+                    
+                    # Extract individual chips from normalized region
                     for _, chip in df.iterrows():
                         x, y = int(chip['chip_start_x']), int(chip['chip_start_y'])
                         
-                        # Create views for all bands
-                        band_views = [data[y:y+CHIP_PIXELS, x:x+CHIP_PIXELS] for data in region_data]
+                        # Extract normalized chip as views
+                        chip_array = normalized_region[:, y:y+CHIP_PIXELS, x:x+CHIP_PIXELS]
+                        band_views = [chip_array[i] for i in range(4)]
                         
-                        # Create GeoTIFF directly from views
+                        # Create normalized GeoTIFF
                         chip_bounds = (chip['minx'], chip['miny'], chip['maxx'], chip['maxy'])
                         chip_transform = from_bounds(*chip_bounds, CHIP_PIXELS, CHIP_PIXELS)
-                        chip_raster = SceneChipProcessor._create_multiband_geotiff(band_views, chip_transform)
+                        normalized_raster = SceneChipProcessor._create_multiband_geotiff(
+                            band_views, chip_transform, dtype=np.float32
+                        )
                         
-                        # Calculate cloud coverage from SCL view
-                        scl_index = BANDS.index('scl')
-                        scl_view = band_views[scl_index]
-                        cloud_coverage = float(scl_view[scl_view > 0].mean()) if scl_view[scl_view > 0].size > 0 else 0.0
+                        # Calculate temporal encodings
+                        dt = pd.to_datetime(chip['datetime'])
+                        lat, lon = (chip['miny'] + chip['maxy']) / 2, (chip['minx'] + chip['maxx']) / 2
                         
                         results.append({
-                            'chip_id': chip['chip_id'],
+                            'id': chip['chip_id'],
                             'datetime': chip['datetime'],
-                            'chip_raster': chip_raster,
-                            'is_complete': chip['is_complete'],
-                            'cloud_coverage': cloud_coverage,
-                            'geohash': chip['geohash']
+                            'scene_id': chip['scene_id'],
+                            'geohash': chip['geohash'],
+                            'normalized_raster': normalized_raster,
+                            'lat': lat,
+                            'lon': lon,
+                            'week_sin': np.sin(dt.isocalendar().week * 2 * np.pi / 52),
+                            'week_cos': np.cos(dt.isocalendar().week * 2 * np.pi / 52),
+                            'hour_sin': np.sin(dt.hour * 2 * np.pi / 24),
+                            'hour_cos': np.cos(dt.hour * 2 * np.pi / 24),
+                            'lat_sin': np.sin(lat * np.pi / 180),
+                            'lat_cos': np.cos(lat * np.pi / 180),
+                            'lon_sin': np.sin(lon * np.pi / 180),
+                            'lon_cos': np.cos(lon * np.pi / 180)
                         })
                         
                 except Exception as e:
