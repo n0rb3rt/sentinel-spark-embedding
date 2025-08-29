@@ -37,7 +37,7 @@ sagemaker:
 
 # Sentinel-2 Data Configuration
 sentinel:
-  bands: ["blue", "green", "red", "nir", "scl"]
+  bands: ["blue", "green", "red", "nir"]
 
 # Job-Specific Processing Parameters
 jobs:

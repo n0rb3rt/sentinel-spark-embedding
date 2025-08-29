@@ -5,7 +5,7 @@ Extracts 256px chips from Sentinel-2 scenes with geohash partitioning
 """
 from sedona.stac.client import Client
 from pyspark.sql.functions import *
-from ..config.config import CONFIG, CLAY_METADATA
+from ..config.config import CONFIG
 from ..lib.sedona_utils import get_global_chips, create_sedona_session
 from ..lib.raster_utils import SceneChipProcessor
 import boto3
@@ -23,7 +23,6 @@ def main():
     start_date = CONFIG.jobs.chip_extraction.start_date
     end_date = CONFIG.jobs.chip_extraction.end_date
     bands = CONFIG.sentinel.bands
-    band_meta = CLAY_METADATA['sentinel-2-l2a'].bands
 
     # Create Spark session
     spark = create_sedona_session("SentinelChipExtraction")
@@ -66,11 +65,12 @@ def main():
         scene_chip_pairs = scenes_s3.crossJoin(chips_df) \
             .filter(expr("ST_Intersects(scene_geom, chip_geometry)")) \
             .withColumn("is_complete", expr("ST_Contains(scene_geom, chip_geometry)")) \
+            .withColumn("chip_wkb", expr("ST_AsBinary(chip_geometry)")) \
             .drop("scene_geom", "chip_geometry")
         
         print(f"Found {scene_chip_pairs.count()} chips")
         
-        # 4. Process chips with Clay normalization in UDF
+        # 4. Process chips with tensor-optimized Clay processing
         print("Processing scene-chip pairs...")
         normalized_chips = scene_chip_pairs.groupBy("scene_id", "datetime", "region_id").applyInPandas(
             lambda df: SceneChipProcessor.process(df, broadcast_urls),
@@ -78,14 +78,16 @@ def main():
         ).sortWithinPartitions("geohash", "id", "datetime") \
          .withColumn("created_at", current_timestamp())
         
+        table_name = "netcdf_chips"
+
         # Create table with partition transforms using SQL
         schema_ddl = normalized_chips._jdf.schema().toDDL()
         spark.sql(f"""
-            CREATE OR REPLACE TABLE sentinel.normalized_chips (
+            CREATE OR REPLACE TABLE sentinel.{table_name} (
                 {schema_ddl}
             ) USING iceberg
             PARTITIONED BY (truncate(geohash, 4), month(datetime))
-            LOCATION '{output_path}'
+            LOCATION '{output_path}/{table_name}'
             TBLPROPERTIES (
                 'write.target-file-size-bytes'='134217728',
                 'write.parquet.compression-codec'='zstd',
@@ -94,7 +96,7 @@ def main():
         """)
         
         # Write to Iceberg table
-        normalized_chips.writeTo("sentinel.normalized_chips").append()
+        normalized_chips.writeTo(f"sentinel.{table_name}").append()
         
         print(f"Successfully processed chips")
         
