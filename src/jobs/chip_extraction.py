@@ -9,6 +9,7 @@ from ..config.config import CONFIG
 from ..lib.sedona_utils import get_global_chips, create_sedona_session
 from ..lib.raster_utils import SceneChipProcessor
 import boto3
+import time
 
 def get_ssm_parameter(name):
     """Get parameter from SSM Parameter Store"""
@@ -16,6 +17,7 @@ def get_ssm_parameter(name):
     return ssm.get_parameter(Name=name)['Parameter']['Value']
 
 def main():
+    start_time = time.time()
     # Get runtime configuration
     bucket_name = get_ssm_parameter('/airflow/variables/bucket_name')
     aoi_bounds = CONFIG.jobs.chip_extraction.aoi_bounds
@@ -66,17 +68,20 @@ def main():
             .filter(expr("ST_Intersects(scene_geom, chip_geometry)")) \
             .withColumn("is_complete", expr("ST_Contains(scene_geom, chip_geometry)")) \
             .withColumn("chip_wkb", expr("ST_AsBinary(chip_geometry)")) \
-            .drop("scene_geom", "chip_geometry")
+            .drop("scene_geom", "chip_geometry") \
+            .repartition("scene_id", "datetime")
+            
         
         print(f"Found {scene_chip_pairs.count()} chips")
         
         # 4. Process chips with tensor-optimized Clay processing
         print("Processing scene-chip pairs...")
-        normalized_chips = scene_chip_pairs.groupBy("scene_id", "datetime", "region_id").applyInPandas(
-            lambda df: SceneChipProcessor.process(df, broadcast_urls),
-            SceneChipProcessor.schema
-        ).sortWithinPartitions("geohash", "id", "datetime") \
-         .withColumn("created_at", current_timestamp())
+        normalized_chips = scene_chip_pairs.groupBy("scene_id", "datetime", "region_id") \
+            .applyInPandas(
+                lambda df: SceneChipProcessor.process(df, broadcast_urls),
+                SceneChipProcessor.schema
+            ).sortWithinPartitions("geohash", "id", "datetime") \
+            .withColumn("created_at", current_timestamp())
         
         table_name = "netcdf_chips"
 
@@ -98,7 +103,11 @@ def main():
         # Write to Iceberg table
         normalized_chips.writeTo(f"sentinel.{table_name}").append()
         
-        print(f"Successfully processed chips")
+        end_time = time.time()
+        execution_time = end_time - start_time
+        minutes = int(execution_time // 60)
+        seconds = execution_time % 60
+        print(f"Successfully processed chips in {minutes}m {seconds:.1f}s")
         
     finally:
         spark.stop()
