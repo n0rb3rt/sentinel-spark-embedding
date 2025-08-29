@@ -5,16 +5,10 @@ Extracts 256px chips from Sentinel-2 scenes with geohash partitioning
 """
 from sedona.stac.client import Client
 from pyspark.sql.functions import *
-from ..config.config import CONFIG
+from ..config.config import CONFIG, get_ssm_parameter
 from ..lib.sedona_utils import get_global_chips, create_sedona_session
 from ..lib.raster_utils import SceneChipProcessor
-import boto3
 import time
-
-def get_ssm_parameter(name):
-    """Get parameter from SSM Parameter Store"""
-    ssm = boto3.client('ssm')
-    return ssm.get_parameter(Name=name)['Parameter']['Value']
 
 def main():
     start_time = time.time()

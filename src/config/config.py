@@ -4,6 +4,7 @@ Configuration for Sentinel processing jobs using OmegaConf
 from omegaconf import OmegaConf
 from pathlib import Path
 import yaml
+import boto3
 
 def load_clay_metadata():
     """Load Clay model metadata"""
@@ -36,6 +37,11 @@ def _flatten_config(config, prefix="spark"):
         else:
             items.append((f"{prefix}.{key}", str(value)))
     return items
+
+def get_ssm_parameter(name):
+    """Get parameter from SSM Parameter Store"""
+    ssm = boto3.client('ssm')
+    return ssm.get_parameter(Name=name)['Parameter']['Value']
 
 # Global config instances
 CONFIG = load_config()
