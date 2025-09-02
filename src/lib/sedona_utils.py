@@ -66,9 +66,16 @@ def get_global_chips(spark, aoi_bounds):
             SELECT *,
                 ST_MakeEnvelope(minx, miny, maxx, maxy, 4326) as chip_geometry
             FROM chip_coords
+        ),
+        chip_centers AS (
+            SELECT *,
+                ST_Centroid(chip_geometry) as chip_center
+            FROM chip_geometries
         )
         SELECT *,
-            ST_GeoHash(ST_Centroid(chip_geometry), 6) as geohash
-        FROM chip_geometries
+            ST_GeoHash(chip_center, 6) as geohash,
+            ST_Y(chip_center) as chip_center_lat,
+            ST_X(chip_center) as chip_center_lon
+        FROM chip_centers
     """)
 

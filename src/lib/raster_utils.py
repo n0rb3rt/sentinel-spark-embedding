@@ -70,16 +70,13 @@ class SceneChipProcessor:
         return buffer.getvalue()
     
     @staticmethod
-    def _create_clay_tensor_blob(normalized_chip, time_tensor, latlon_tensor, waves_tensor, gsd_tensor):
+    def _create_clay_tensor_blob(normalized_chip, latlon_tensor, tensor_template):
         """Create Clay-ready PyTorch tensor blob for single chip"""
-        import torch
         
         clay_datacube = {
+            **tensor_template,
             'pixels': torch.from_numpy(normalized_chip).float(),  # (4, 256, 256)
-            'time': time_tensor,      # (4,) - shared across region
             'latlon': latlon_tensor,  # (4,) - chip-specific
-            'waves': waves_tensor,    # (4,) - static S2 wavelengths
-            'gsd': gsd_tensor         # scalar - static S2 resolution
         }
         
         buffer = BytesIO()
@@ -108,28 +105,18 @@ class SceneChipProcessor:
         results = []
 
         s2_bands = CLAY_METADATA['sentinel-2-l2a'].bands
-        
-        # Temporal (same for all chips in region)
-        week = scene_dt.isocalendar().week * 2 * np.pi / 52
-        hour = scene_dt.hour * 2 * np.pi / 24
-        region_time_tensor = torch.tensor([
-            math.sin(week), math.cos(week),
-            math.sin(hour), math.cos(hour)
-        ]).float()
-        
-        # Static S2 metadata (same for all chips)
-        waves_tensor = torch.tensor([
-            s2_bands.wavelength.blue,
-            s2_bands.wavelength.green, 
-            s2_bands.wavelength.red,
-            s2_bands.wavelength.nir
-        ]).float()
-        
-        gsd_tensor = torch.tensor(CLAY_METADATA['sentinel-2-l2a'].gsd).float()
-        
-        # Normalization arrays (numpy, not xarray)
+        s2_waves = s2_bands.wavelength
+        gsd = CLAY_METADATA['sentinel-2-l2a'].gsd
         clay_means = np.array([s2_bands.mean.blue, s2_bands.mean.green, s2_bands.mean.red, s2_bands.mean.nir])
         clay_stds = np.array([s2_bands.std.blue, s2_bands.std.green, s2_bands.std.red, s2_bands.std.nir])
+        week = scene_dt.isocalendar().week * 2 * np.pi / 52
+        hour = scene_dt.hour * 2 * np.pi / 24
+    
+        tensor_template = {
+            "time": torch.tensor([math.sin(week), math.cos(week), math.sin(hour), math.cos(hour)]).float(),
+            "waves": torch.tensor([s2_waves.blue, s2_waves.green, s2_waves.red, s2_waves.nir]).float(),
+            "gsd": torch.tensor(gsd).float()
+        }
         
         try: 
             print(f"Processing {len(df)} chips in region {region_id} for scene {scene_id} at {scene_dt}")
@@ -154,17 +141,12 @@ class SceneChipProcessor:
             for _, chip in df.iterrows():
                 x, y = int(chip['chip_start_x']), int(chip['chip_start_y'])
                 chip_bounds = (chip['minx'], chip['miny'], chip['maxx'], chip['maxy'])
+                chip_lat, chip_lon = chip['chip_center_lat'], chip['chip_center_lon']
                 
-                # Chip-specific lat/lon
-                chip_lat = region_miny + (y + CHIP_PIXELS/2) * (region_maxy - region_miny) / tile_pixels
-                chip_lon = region_minx + (x + CHIP_PIXELS/2) * (region_maxx - region_minx) / tile_pixels
                 lat_rad = chip_lat * np.pi / 180
                 lon_rad = chip_lon * np.pi / 180
                 
-                latlon_tensor = torch.tensor([
-                    math.sin(lat_rad), math.cos(lat_rad),
-                    math.sin(lon_rad), math.cos(lon_rad)
-                ]).float()
+                latlon_tensor = torch.tensor([math.sin(lat_rad), math.cos(lat_rad), math.sin(lon_rad), math.cos(lon_rad)]).float()
                 
                 # Extract chip data
                 raw_chip = region_array[:, y:y+CHIP_PIXELS, x:x+CHIP_PIXELS]
@@ -175,13 +157,7 @@ class SceneChipProcessor:
                     'datetime': chip['datetime'],
                     'scene_id': chip['scene_id'],
                     'geohash': chip['geohash'],
-                    'clay_tensor': SceneChipProcessor._create_clay_tensor_blob(
-                        normalized_chip,
-                        region_time_tensor,
-                        latlon_tensor, 
-                        waves_tensor,
-                        gsd_tensor
-                    ),
+                    'clay_tensor': SceneChipProcessor._create_clay_tensor_blob(normalized_chip, latlon_tensor, tensor_template),
                     'geotiff': SceneChipProcessor._create_geotiff_blob(raw_chip, chip_bounds),
                     'geometry': chip['chip_wkb']  
                 })

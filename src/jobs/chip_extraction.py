@@ -98,7 +98,7 @@ def main():
         normalized_chips.writeTo(f"sentinel.{table_name}").append()
         
         end_time = time.time()
-        print(f"Successfully processed chips in {(end_time - start_time) / 60:.1f}s")
+        print(f"Successfully processed chips in {(end_time - start_time) / 60:.1f}m")
         
     finally:
         spark.stop()
