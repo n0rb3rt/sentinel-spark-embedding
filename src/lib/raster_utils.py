@@ -30,6 +30,7 @@ class SceneChipProcessor:
         StructField("datetime", TimestampType()),
         StructField("scene_id", StringType()),
         StructField("geohash", StringType()),
+        StructField("scl_mean", FloatType()),  # SCL band mean for cloud filtering
         StructField("clay_tensor", BinaryType()),  # PyTorch tensor blob with Clay inputs
         StructField("geotiff", BinaryType()),  # GeoTIFF blob for visualization
         StructField("geometry", BinaryType())  # WKB polygon geometry
@@ -61,7 +62,7 @@ class SceneChipProcessor:
         buffer = BytesIO()
         with rasterio.open(
             buffer, 'w', driver='GTiff',
-            height=CHIP_PIXELS, width=CHIP_PIXELS, count=4,
+            height=CHIP_PIXELS, width=CHIP_PIXELS, count=raw_chip_data.shape[0],
             dtype=np.uint16, crs='EPSG:4326', transform=transform,
             compress='lzw'
         ) as dst:
@@ -134,8 +135,8 @@ class SceneChipProcessor:
                     for i, src in enumerate(sources):
                         region_array[i] = SceneChipProcessor._extract_reprojected_region(src, region_bounds, tile_pixels)
             
-            # Normalize entire region (vectorized numpy)
-            normalized_region = (region_array.astype(np.float32) / 10000.0 - clay_means[:, None, None]) / clay_stds[:, None, None]
+            # Normalize only spectral bands (first 4) for Clay processing
+            normalized_region = (region_array[:4].astype(np.float32) - clay_means[:, None, None]) / clay_stds[:, None, None]
             
             # Extract chips (only lat/lon varies)
             for _, chip in df.iterrows():
@@ -157,6 +158,7 @@ class SceneChipProcessor:
                     'datetime': chip['datetime'],
                     'scene_id': chip['scene_id'],
                     'geohash': chip['geohash'],
+                    'scl_mean': float(np.mean(raw_chip[4])),
                     'clay_tensor': SceneChipProcessor._create_clay_tensor_blob(normalized_chip, latlon_tensor, tensor_template),
                     'geotiff': SceneChipProcessor._create_geotiff_blob(raw_chip, chip_bounds),
                     'geometry': chip['chip_wkb']  

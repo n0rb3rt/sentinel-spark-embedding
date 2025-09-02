@@ -45,7 +45,7 @@ sagemaker:
 
 # Sentinel-2 Data Configuration
 sentinel:
-  bands: ["blue", "green", "red", "nir"]
+  bands: ["blue", "green", "red", "nir", "scl"]
 
 # Job-Specific Processing Parameters
 jobs:
@@ -54,8 +54,8 @@ jobs:
     chip_size_pixels: 256
     ground_resolution_meters: 10
     region_size_chips: 12
-    start_date: "2024-01-16"
-    end_date: "2024-01-31"
+    start_date: "2024-05-16"
+    end_date: "2024-05-31"
   temporal_merge:
     lookback_days: 30
     min_valid_pixels: 128
