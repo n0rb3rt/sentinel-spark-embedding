@@ -1,7 +1,6 @@
 """Raster processing utilities"""
 import math
 import numpy as np
-import xarray as xr
 import rasterio
 from rasterio.warp import reproject, Resampling
 from rasterio.transform import from_bounds
@@ -10,6 +9,7 @@ import pandas as pd
 from pyspark.sql.types import *
 from ..config.config import CONFIG, CLAY_METADATA
 from contextlib import ExitStack
+import torch
 
 BANDS = CONFIG.sentinel.bands
 CHIP_PIXELS = CONFIG.jobs.chip_extraction.chip_size_pixels
@@ -23,14 +23,14 @@ def get_chip_size_degrees():
     return chip_size_meters / meters_per_degree
 
 class SceneChipProcessor:
-    """Processes scene chips with tensor-optimized xarray processing"""
+    """Processes scene chips with tensor-optimized numpy processing"""
     
     schema = StructType([
         StructField("id", StringType()),
         StructField("datetime", TimestampType()),
         StructField("scene_id", StringType()),
         StructField("geohash", StringType()),
-        StructField("clay_tensor", BinaryType()),  # NetCDF blob with all tensor data
+        StructField("clay_tensor", BinaryType()),  # PyTorch tensor blob with Clay inputs
         StructField("geotiff", BinaryType()),  # GeoTIFF blob for visualization
         StructField("geometry", BinaryType())  # WKB polygon geometry
     ])
@@ -56,10 +56,7 @@ class SceneChipProcessor:
     @staticmethod
     def _create_geotiff_blob(raw_chip_data, chip_bounds):
         """Create GeoTIFF blob from raw uint16 chip data"""
-        from rasterio.transform import from_bounds
-        
-        minx, miny, maxx, maxy = chip_bounds
-        transform = from_bounds(minx, miny, maxx, maxy, CHIP_PIXELS, CHIP_PIXELS)
+        transform = from_bounds(*chip_bounds, CHIP_PIXELS, CHIP_PIXELS)
         
         buffer = BytesIO()
         with rasterio.open(
@@ -73,80 +70,69 @@ class SceneChipProcessor:
         return buffer.getvalue()
     
     @staticmethod
-    def _create_clay_tensor_blob(chip_data, datetime):
-        """Create embedding-ready NetCDF blob with all Clay model inputs"""
-        dt = pd.to_datetime(datetime)
-
-        lat_center = float(chip_data.y.mean())
-        lon_center = float(chip_data.x.mean())
+    def _create_clay_tensor_blob(normalized_chip, time_tensor, latlon_tensor, waves_tensor, gsd_tensor):
+        """Create Clay-ready PyTorch tensor blob for single chip"""
+        import torch
         
-        # Create xarray Dataset with all Clay inputs
-        clay_dataset = xr.Dataset({
-            # Main tensor data (4, 256, 256) - Clay expects (band, height, width)
-            'pixels': chip_data.transpose('band', 'y', 'x').astype(np.float32),
-            
-            # Temporal features
-            'temporal': xr.DataArray([
-                dt.isocalendar().week,
-                dt.hour,
-                np.sin(dt.isocalendar().week * 2 * np.pi / 52),
-                np.cos(dt.isocalendar().week * 2 * np.pi / 52),
-                np.sin(dt.hour * 2 * np.pi / 24),
-                np.cos(dt.hour * 2 * np.pi / 24)
-            ], dims=['temporal_features']),
-            
-            # Spatial features
-            'spatial': xr.DataArray([
-                lat_center,
-                lon_center,
-                np.sin(lat_center * np.pi / 180),
-                np.cos(lat_center * np.pi / 180),
-                np.sin(lon_center * np.pi / 180),
-                np.cos(lon_center * np.pi / 180)
-            ], dims=['spatial_features'])
-        })
+        clay_datacube = {
+            'pixels': torch.from_numpy(normalized_chip).float(),  # (4, 256, 256)
+            'time': time_tensor,      # (4,) - shared across region
+            'latlon': latlon_tensor,  # (4,) - chip-specific
+            'waves': waves_tensor,    # (4,) - static S2 wavelengths
+            'gsd': gsd_tensor         # scalar - static S2 resolution
+        }
         
-        # Serialize to compressed NetCDF bytes
         buffer = BytesIO()
-        clay_dataset.to_netcdf(
-            buffer, 
-            engine='h5netcdf', 
-            encoding={'pixels': {'zlib': True, 'complevel': 6}}
-        )
+        torch.save(clay_datacube, buffer)
         return buffer.getvalue()
     
     @staticmethod
     def process(df, broadcast_urls) -> pd.DataFrame:
-        """Process chips with xarray - tensor-optimized for Clay embeddings"""
+        """Process chips with numpy - tensor-optimized for Clay embeddings"""
         if df.empty:
             return pd.DataFrame()
             
         scene_id = df.iloc[0]['scene_id']
-        datetime_str = str(df.iloc[0]['datetime'])
+        scene_dt = df.iloc[0]['datetime']
         region_id = df.iloc[0]['region_id']
         region_minx = df.iloc[0]['region_minx']
         region_miny = df.iloc[0]['region_miny']
         region_maxx = df.iloc[0]['region_maxx']
         region_maxy = df.iloc[0]['region_maxy']
-        urls = broadcast_urls.value.get((scene_id, datetime_str))
+        urls = broadcast_urls.value.get((scene_id, str(scene_dt)))
         region_bounds = (region_minx, region_miny, region_maxx, region_maxy)
         
         if not urls:
             return pd.DataFrame()
         
         results = []
-        
-        # Clay normalization constants
+
         s2_bands = CLAY_METADATA['sentinel-2-l2a'].bands
-        clay_stats = xr.DataArray(
-            [[s2_bands.mean.blue, s2_bands.mean.green, s2_bands.mean.red, s2_bands.mean.nir],
-             [s2_bands.std.blue, s2_bands.std.green, s2_bands.std.red, s2_bands.std.nir]],
-            dims=['stat', 'band'],
-            coords={'stat': ['mean', 'std'], 'band': ['blue', 'green', 'red', 'nir']}
-        )
+        
+        # Temporal (same for all chips in region)
+        week = scene_dt.isocalendar().week * 2 * np.pi / 52
+        hour = scene_dt.hour * 2 * np.pi / 24
+        region_time_tensor = torch.tensor([
+            math.sin(week), math.cos(week),
+            math.sin(hour), math.cos(hour)
+        ]).float()
+        
+        # Static S2 metadata (same for all chips)
+        waves_tensor = torch.tensor([
+            s2_bands.wavelength.blue,
+            s2_bands.wavelength.green, 
+            s2_bands.wavelength.red,
+            s2_bands.wavelength.nir
+        ]).float()
+        
+        gsd_tensor = torch.tensor(CLAY_METADATA['sentinel-2-l2a'].gsd).float()
+        
+        # Normalization arrays (numpy, not xarray)
+        clay_means = np.array([s2_bands.mean.blue, s2_bands.mean.green, s2_bands.mean.red, s2_bands.mean.nir])
+        clay_stds = np.array([s2_bands.std.blue, s2_bands.std.green, s2_bands.std.red, s2_bands.std.nir])
         
         try: 
-            print(f"Processing {len(df)} chips in region {region_id} for scene {scene_id} at {datetime_str}")
+            print(f"Processing {len(df)} chips in region {region_id} for scene {scene_id} at {scene_dt}")
             
             # Use rasterio for precise region extraction
             tile_pixels = REGION_SIZE * CHIP_PIXELS
@@ -161,37 +147,41 @@ class SceneChipProcessor:
                     for i, src in enumerate(sources):
                         region_array[i] = SceneChipProcessor._extract_reprojected_region(src, region_bounds, tile_pixels)
             
-            # Convert to xarray with region coordinates
-            region_data = xr.DataArray(
-                region_array,
-                dims=['band', 'y', 'x'],
-                coords={
-                    'band': ['blue', 'green', 'red', 'nir'],
-                    'y': np.linspace(region_maxy, region_miny, tile_pixels),
-                    'x': np.linspace(region_minx, region_maxx, tile_pixels)
-                }
-            )
+            # Normalize entire region (vectorized numpy)
+            normalized_region = (region_array.astype(np.float32) / 10000.0 - clay_means[:, None, None]) / clay_stds[:, None, None]
             
-            # Normalize in-place
-            region_data = (region_data / 10000.0 - clay_stats.sel(stat='mean')) / clay_stats.sel(stat='std')
-            
-            # Extract individual chips
+            # Extract chips (only lat/lon varies)
             for _, chip in df.iterrows():
                 x, y = int(chip['chip_start_x']), int(chip['chip_start_y'])
-                
-                # Extract raw data for GeoTIFF (before normalization)
-                raw_chip = region_array[:, y:y+CHIP_PIXELS, x:x+CHIP_PIXELS]
                 chip_bounds = (chip['minx'], chip['miny'], chip['maxx'], chip['maxy'])
                 
-                # Extract normalized data for Clay tensor (coordinates already set)
-                chip_data = region_data.isel(x=slice(x, x + CHIP_PIXELS), y=slice(y, y + CHIP_PIXELS))
+                # Chip-specific lat/lon
+                chip_lat = region_miny + (y + CHIP_PIXELS/2) * (region_maxy - region_miny) / tile_pixels
+                chip_lon = region_minx + (x + CHIP_PIXELS/2) * (region_maxx - region_minx) / tile_pixels
+                lat_rad = chip_lat * np.pi / 180
+                lon_rad = chip_lon * np.pi / 180
+                
+                latlon_tensor = torch.tensor([
+                    math.sin(lat_rad), math.cos(lat_rad),
+                    math.sin(lon_rad), math.cos(lon_rad)
+                ]).float()
+                
+                # Extract chip data
+                raw_chip = region_array[:, y:y+CHIP_PIXELS, x:x+CHIP_PIXELS]
+                normalized_chip = normalized_region[:, y:y+CHIP_PIXELS, x:x+CHIP_PIXELS]
                 
                 results.append({
                     'id': chip['chip_id'],
                     'datetime': chip['datetime'],
                     'scene_id': chip['scene_id'],
                     'geohash': chip['geohash'],
-                    'clay_tensor': SceneChipProcessor._create_clay_tensor_blob(chip_data, chip['datetime']),
+                    'clay_tensor': SceneChipProcessor._create_clay_tensor_blob(
+                        normalized_chip,
+                        region_time_tensor,
+                        latlon_tensor, 
+                        waves_tensor,
+                        gsd_tensor
+                    ),
                     'geotiff': SceneChipProcessor._create_geotiff_blob(raw_chip, chip_bounds),
                     'geometry': chip['chip_wkb']  
                 })

@@ -54,7 +54,7 @@ jobs:
     chip_size_pixels: 256
     ground_resolution_meters: 10
     region_size_chips: 12
-    start_date: "2024-01-01"
+    start_date: "2024-01-16"
     end_date: "2024-01-31"
   temporal_merge:
     lookback_days: 30

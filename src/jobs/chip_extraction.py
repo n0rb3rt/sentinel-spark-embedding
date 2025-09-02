@@ -12,6 +12,7 @@ import time
 
 def main():
     start_time = time.time()
+    
     # Get runtime configuration
     bucket_name = get_ssm_parameter('/airflow/variables/bucket_name')
     aoi_bounds = CONFIG.jobs.chip_extraction.aoi_bounds
@@ -19,6 +20,7 @@ def main():
     start_date = CONFIG.jobs.chip_extraction.start_date
     end_date = CONFIG.jobs.chip_extraction.end_date
     bands = CONFIG.sentinel.bands
+    table_name = "chips"
 
     # Create Spark session
     spark = create_sedona_session("SentinelChipExtraction")
@@ -76,8 +78,6 @@ def main():
                 SceneChipProcessor.schema
             ).sortWithinPartitions("geohash", "id", "datetime") \
             .withColumn("created_at", current_timestamp())
-        
-        table_name = "netcdf_chips"
 
         # Create table with partition transforms using SQL
         schema_ddl = normalized_chips._jdf.schema().toDDL()
@@ -98,10 +98,7 @@ def main():
         normalized_chips.writeTo(f"sentinel.{table_name}").append()
         
         end_time = time.time()
-        execution_time = end_time - start_time
-        minutes = int(execution_time // 60)
-        seconds = execution_time % 60
-        print(f"Successfully processed chips in {minutes}m {seconds:.1f}s")
+        print(f"Successfully processed chips in {(end_time - start_time) / 60:.1f}s")
         
     finally:
         spark.stop()
