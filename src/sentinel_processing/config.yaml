@@ -1,0 +1,63 @@
+# Sentinel-2 Processing Configuration
+version: "0.1.0"  # Placeholder, overridden at runtime
+
+rasterio:
+  GDAL_CACHEMAX: 512
+  CPL_VSIL_CURL_CACHE_SIZE: 100000000
+  GDAL_HTTP_MULTIPLEX: "YES"
+  GDAL_DISABLE_READDIR_ON_OPEN: "EMPTY_DIR"
+  GDAL_HTTP_MAX_RETRY: 3
+  GDAL_HTTP_RETRY_DELAY: 1
+  VSI_CACHE: "TRUE"
+  VSI_CACHE_SIZE: 50000000
+  GDAL_BAND_BLOCK_CACHE: "HASHSET"
+  GDAL_MAX_BAND_COUNT: 64
+
+# Sentinel-2 Data Configuration
+sentinel:
+  bands: ["blue", "green", "red", "nir", "scl"]
+
+# Job-Specific Processing Parameters
+jobs:
+  chip_extraction:
+    # Job parameters
+    aoi_bounds: [-61.7573, -10.9065, -61.0926, -10.2531]
+    chip_size_pixels: 256
+    ground_resolution_meters: 10
+    region_size_chips: 12
+    start_date: "2024-05-16"
+    end_date: "2024-05-31"
+    
+    # Job requirements
+    spark:
+      packages: ["org.apache.sedona:sedona-spark-3.5_2.12:1.7.2", "org.datasyslab:geotools-wrapper:1.7.2-28.5"]
+      include_model: true
+  
+  embedding_generation:
+    # Job parameters
+    input_table: "chips"
+    output_table: "embeddings"
+    model_path: "clay/v1.0/model.pth"
+    batch_size: 32
+    max_cloud_cover: 0.3
+    bands: ["red", "green", "blue", "nir"]
+    
+    # Job requirements
+    spark:
+      packages: []
+      include_model: true
+
+# local dev
+spark:
+  master: "local[4]"
+  driver:
+    memory: "4g"
+  jars:
+    packages: "org.apache.sedona:sedona-spark-3.5_2.12:1.7.2,org.datasyslab:geotools-wrapper:1.7.2-28.5,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.10.0,org.apache.iceberg:iceberg-aws-bundle:1.10.0"
+  sql:
+    catalog:
+      spark_catalog: "org.apache.iceberg.spark.SparkSessionCatalog"
+      "spark_catalog.catalog-impl": "org.apache.iceberg.aws.glue.GlueCatalog"
+      "spark_catalog.warehouse": "s3://sentinel-121891376456-us-east-2/warehouse/"
+      "spark_catalog.io-impl": "org.apache.iceberg.aws.s3.S3FileIO"
+    extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"

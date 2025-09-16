@@ -10,3 +10,8 @@ cdk.out/
 
 # OS
 .DS_Store
+
+dist/
+.cache/
+
+sample-geospatial-foundation-models-on-aws/
