@@ -5,18 +5,18 @@ Extracts 256px chips from Sentinel-2 scenes with geohash partitioning
 """
 from sedona.stac.client import Client
 from pyspark.sql.functions import *
-from ..config.config import CONFIG, get_ssm_parameter
-from ..lib.sedona_utils import get_global_chips, create_sedona_session
-from ..lib.raster_utils import SceneChipProcessor
+from sentinel_processing.config import CONFIG, get_ssm_parameter
+from sentinel_processing.lib.sedona_utils import get_global_chips, create_sedona_session
+from sentinel_processing.lib.raster_utils import SceneChipProcessor
+from sentinel_processing.lib.emr_utils import submit_to_emr
+import sys
 import time
 
 def main():
     start_time = time.time()
     
     # Get runtime configuration
-    bucket_name = get_ssm_parameter('/airflow/variables/bucket_name')
     aoi_bounds = CONFIG.jobs.chip_extraction.aoi_bounds
-    output_path = f's3://{bucket_name}/data/sentinel/'
     start_date = CONFIG.jobs.chip_extraction.start_date
     end_date = CONFIG.jobs.chip_extraction.end_date
     bands = CONFIG.sentinel.bands
@@ -79,6 +79,8 @@ def main():
             ).sortWithinPartitions("geohash", "id", "datetime") \
             .withColumn("created_at", current_timestamp())
 
+        spark.sql("CREATE DATABASE IF NOT EXISTS sentinel")
+
         # Create table with partition transforms using SQL
         schema_ddl = normalized_chips._jdf.schema().toDDL()
         spark.sql(f"""
@@ -86,8 +88,8 @@ def main():
                 {schema_ddl}
             ) USING iceberg
             PARTITIONED BY (truncate(geohash, 4), month(datetime))
-            LOCATION '{output_path}/{table_name}'
             TBLPROPERTIES (
+                'format-version'='2',
                 'write.target-file-size-bytes'='134217728',
                 'write.parquet.compression-codec'='zstd',
                 'write.sort-order'='geohash,id,datetime'
@@ -97,11 +99,13 @@ def main():
         # Write to Iceberg table
         normalized_chips.writeTo(f"sentinel.{table_name}").append()
         
-        end_time = time.time()
-        print(f"Successfully processed chips in {(end_time - start_time) / 60:.1f}m")
+        print(f"Successfully processed chips in {(time.time() - start_time) / 60:.1f}m")
         
     finally:
         spark.stop()
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "--submit":
+        submit_to_emr("chip_extraction", "chip_extraction.py")
+    else:
+        main()

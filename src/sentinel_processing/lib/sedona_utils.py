@@ -4,15 +4,32 @@ from pyspark.sql.functions import expr
 from pyspark import SparkConf
 from pyspark.sql import SparkSession
 from sedona.spark import SedonaContext
-from ..config.config import CONFIG
+from sentinel_processing.config import CONFIG
 
 def create_sedona_session(app_name="SentinelProcessing"):
     """Create Sedona-enabled Spark session with unified config"""
-    spark_conf = SparkConf().setAll(CONFIG.spark.items())
-    spark_session = SparkSession.builder \
-        .appName(app_name) \
-        .config(conf=spark_conf) \
-        .getOrCreate()
+    from sentinel_processing.config import _flatten_config
+    
+    # Apply Spark configuration only if provided via CLI
+    if hasattr(CONFIG, 'spark'):
+        print(f"Applying Spark configs: {CONFIG.spark}")
+        flattened_config = dict(_flatten_config(CONFIG.spark))
+        print(f"Flattened config: {flattened_config}")
+        
+        # Use individual .set() calls instead of .setAll()
+        spark_conf = SparkConf()
+        for key, value in flattened_config.items():
+            spark_conf.set(key, value)
+        
+        spark_session = SparkSession.builder \
+            .appName(app_name) \
+            .config(conf=spark_conf) \
+            .getOrCreate()
+    else:
+        print("No Spark configs found in CONFIG")
+        spark_session = SparkSession.builder.appName(app_name).getOrCreate()
+    
+    # Initialize Sedona context
     return SedonaContext.create(spark_session)
 
 def get_global_chips(spark, aoi_bounds):

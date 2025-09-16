@@ -5,19 +5,19 @@ from omegaconf import OmegaConf
 from pathlib import Path
 import yaml
 import boto3
+from importlib import resources
+from importlib.metadata import version
 
-def load_clay_metadata():
-    """Load Clay model metadata"""
-    metadata_path = Path(__file__).parent.parent.parent / "metadata.yaml"
-    with open(metadata_path) as f:
-        return OmegaConf.create(yaml.safe_load(f))
+
 
 def load_config():
     """Load config with CLI overrides"""
-    config_path = Path(__file__).parent.parent.parent / "config.yaml"
+    # Load base config from same package
+    with resources.open_text('sentinel_processing', 'config.yaml') as f:
+        base_config = OmegaConf.create(yaml.safe_load(f))
     
-    # Load base config
-    base_config = OmegaConf.load(config_path)
+    # Set version from actual package version
+    base_config.version = version('sentinel_processing')
     
     # Merge with CLI overrides (automatically parsed)
     cli_config = OmegaConf.from_cli()
@@ -45,7 +45,3 @@ def get_ssm_parameter(name):
 
 # Global config instances
 CONFIG = load_config()
-CLAY_METADATA = load_clay_metadata()
-
-# Replace nested spark config with flattened version
-CONFIG.spark = dict(_flatten_config(CONFIG.spark))

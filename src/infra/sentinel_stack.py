@@ -40,15 +40,15 @@ class SentinelProcessingStack(Stack):
         )
         
         # Docker Image Asset (builds and pushes automatically)
-        self.docker_asset = ecr_assets.DockerImageAsset(
-            self, "SentinelSparkImage",
-            directory="docker",
-            file="Dockerfile",
-            platform=ecr_assets.Platform.LINUX_AMD64,
-            build_args={
-                "BUILDKIT_INLINE_CACHE": "1"
-            }
-        )
+        # self.docker_asset = ecr_assets.DockerImageAsset(
+        #     self, "SentinelSparkImage",
+        #     directory="docker",
+        #     file="Dockerfile",
+        #     platform=ecr_assets.Platform.LINUX_AMD64,
+        #     build_args={
+        #         "BUILDKIT_INLINE_CACHE": "1"
+        #     }
+        # )
         
         # Glue Database
         self.glue_database = glue.CfnDatabase(
@@ -141,9 +141,9 @@ class SentinelProcessingStack(Stack):
                  value=self.bucket.bucket_name,
                  description="S3 bucket name")
         
-        CfnOutput(self, "ContainerImageUri",
-                 value=self.docker_asset.image_uri,
-                 description="Docker image URI")
+        # CfnOutput(self, "ContainerImageUri",
+        #          value=self.docker_asset.image_uri,
+        #          description="Docker image URI")
         
         # Store configuration in SSM Parameter Store for Airflow
         ssm.StringParameter(self, "AirflowSageMakerRole",
@@ -154,21 +154,19 @@ class SentinelProcessingStack(Stack):
                            parameter_name="/airflow/variables/bucket_name",
                            string_value=self.bucket.bucket_name)
         
-        ssm.StringParameter(self, "AirflowContainerUri",
-                           parameter_name="/airflow/variables/spark_container_uri",
-                           string_value=self.docker_asset.image_uri)
+        # SSM parameters for EMR job submission
+        ssm.StringParameter(self, "SentinelSparkBucket",
+                           parameter_name="/sentinel-spark/s3-bucket",
+                           string_value=self.bucket.bucket_name)
         
-        # Deploy source code
-        s3deploy.BucketDeployment(self, "DeployCode",
-            sources=[s3deploy.Source.asset("src")],
-            destination_bucket=self.bucket,
-            destination_key_prefix="code"
-        )
+        # ssm.StringParameter(self, "AirflowContainerUri",
+        #                    parameter_name="/airflow/variables/spark_container_uri",
+        #                    string_value=self.docker_asset.image_uri)
         
-        # Deploy DAG to S3 (for MWAA or manual download)
-        s3deploy.BucketDeployment(self, "DeployDAG",
-            sources=[s3deploy.Source.asset("dags")],
-            destination_bucket=self.bucket,
-            destination_key_prefix="airflow/dags"
-        )
+        # Output command to sync all build artifacts
+        CfnOutput(self, "SyncArtifactsCommand",
+                 value=f"aws s3 sync dist/ s3://{self.bucket.bucket_name}/dist/",
+                 description="Run this command to upload all build artifacts")
+
+        
         

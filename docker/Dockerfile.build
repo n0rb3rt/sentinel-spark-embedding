@@ -1,0 +1,13 @@
+# Build environment with Python and tools
+FROM amazonlinux:2023
+
+# Install Python 3.12 and build tools
+RUN yum update -y && \
+    yum install -y \
+        python3.12 \
+        python3.12-pip \
+        python3.12-devel \
+        gcc \
+        zip \
+        git \
+        && yum clean all
