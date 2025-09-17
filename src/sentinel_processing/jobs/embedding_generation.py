@@ -1,102 +1,86 @@
 #!/usr/bin/env python3
 """
-Clay Embedding Generation Job - Spark with Pandas UDF
+Clay Embedding Generation Job - Basic approach with compiled model
 """
-import sys
 import time
-import datetime
 import torch
-import pandas as pd
 import numpy as np
 from io import BytesIO
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, current_timestamp, lit
+
+from pyspark.sql.functions import current_timestamp, lit, col
 from pyspark.sql.types import ArrayType, FloatType
 from pyspark.ml.functions import predict_batch_udf
 from sentinel_processing.config import CONFIG
 from sentinel_processing.lib.sedona_utils import create_sedona_session
 from sentinel_processing.lib.clay_utils import ClayModelSingleton
 
-def make_clay_predict_fn():
+def make_clay_predict_fn(expected_batches):
     """Create compiled Clay model predict function"""
     
-    # Prefer MPS on Apple Silicon, then CUDA, then CPU
-    if torch.backends.mps.is_available():
-        device = torch.device('mps')
-    elif torch.cuda.is_available():
-        device = torch.device('cuda')
-    else:
-        device = torch.device('cpu')
-    print(f"Loading compiled Clay model on {device}...")
-    model = ClayModelSingleton.get_model().to(device)
-    print("Compiled Clay model loaded successfully")
+    model = ClayModelSingleton.get_model()
+    device = next(model.parameters()).device
+    
+    batch_count = 0
     
     def predict(clay_tensors: np.ndarray) -> np.ndarray:
         """Predict embeddings for batch of clay tensors"""
+        nonlocal batch_count
+        batch_count += 1
         batch_start = time.time()
         
         try:
-            # Load all tensors in batch
+            # Load tensors from binary blobs
             batch_data = [np.load(BytesIO(blob)) for blob in clay_tensors]
             
-            # Stack per-chip tensors
-            pixels_arrays = [data['pixels'] for data in batch_data]
-            time_arrays = [data['time'] for data in batch_data]
-            latlon_arrays = [data['latlon'] for data in batch_data]
-            
-            # Use shared tensors from first chip
-            waves = torch.from_numpy(batch_data[0]['waves']).to(device)
-            gsd = torch.from_numpy(batch_data[0]['gsd']).to(device)
-            
-            # Create datacube exactly like the working example
+            # Create datacube
             datacube = {
-                'pixels': torch.from_numpy(np.stack(pixels_arrays)).to(device),
-                'time': torch.from_numpy(np.stack(time_arrays)).to(device),
-                'latlon': torch.from_numpy(np.stack(latlon_arrays)).to(device),
-                'waves': waves,
-                'gsd': gsd
+                'pixels': torch.from_numpy(np.stack([d['pixels'] for d in batch_data])).to(device),
+                'time': torch.from_numpy(np.stack([d['time'] for d in batch_data])).to(device),
+                'latlon': torch.from_numpy(np.stack([d['latlon'] for d in batch_data])).to(device),
+                'waves': torch.from_numpy(batch_data[0]['waves']).to(device),
+                'gsd': torch.from_numpy(batch_data[0]['gsd']).to(device),
             }
             
+            # Generate embeddings
             with torch.no_grad():
                 embeddings = model(datacube)
             
+            result = embeddings.cpu().numpy()
+            
             batch_time = time.time() - batch_start
-            time_per_chip = batch_time / len(clay_tensors)
-            print(f"{datetime.datetime.now().strftime('%H:%M:%S')} - Batch of {len(clay_tensors)} chips in {batch_time:.2f}s ({time_per_chip:.3f}s/chip)")
-            return embeddings.cpu().numpy()
+            throughput = len(clay_tensors) / batch_time
+            progress_pct = min(100, (batch_count / expected_batches) * 100) if expected_batches > 0 else 0
+            print(f"Batch {batch_count}/{expected_batches} ({progress_pct:.0f}%): {len(clay_tensors)} chips in {batch_time:.2f}s ({throughput:.1f} chips/s)")
+            
+            return result
             
         except Exception as e:
-            print(f"Batch embedding generation failed: {e}")
-            return np.zeros((len(clay_tensors), 1024), dtype=np.float32)  # Compiled model outputs 1024 dims
+            print(f"Batch {batch_count}/{expected_batches} failed: {e}")
+            return np.zeros((len(clay_tensors), 1024), dtype=np.float32)
     
     return predict
 
 def main():
     start_time = time.time()
     
-    # Create Spark session with Sedona
     spark = create_sedona_session("ClayEmbeddingGeneration")
     
-    # Configuration
     input_table = CONFIG.jobs.embedding_generation.input_table
     output_table = CONFIG.jobs.embedding_generation.output_table
     batch_size = CONFIG.jobs.embedding_generation.get('batch_size', 32)
     
     try:
-
+        chips_df = spark.read.format("iceberg").load(f"sentinel.{input_table}")
+        total_chips = chips_df.count()
+        expected_batches = (total_chips + batch_size - 1) // batch_size  # Ceiling division
+        print(f"Processing {total_chips:,} chips with batch size {batch_size}")
+        print(f"Expected {expected_batches} batches")
         
-        # Read chips from Iceberg table (limit for testing)
-        chips_df = spark.read \
-            .format("iceberg") \
-            .load(f"sentinel.{input_table}")
-        
-        print(f"Processing {chips_df.count()} chips (test batch)")
-        
-        # Create compiled Clay UDF with automatic batching
+        # Create Clay UDF with progress tracking
         clay_udf = predict_batch_udf(
-            make_clay_predict_fn,
+            lambda: make_clay_predict_fn(expected_batches),
             return_type=ArrayType(FloatType()),
-            batch_size=batch_size  # Compiled model can handle larger batches
+            batch_size=batch_size
         )
         
         embeddings_df = chips_df \
@@ -105,34 +89,27 @@ def main():
             .withColumn("created_at", current_timestamp()) \
             .select("id", "scene_id", "datetime", "geohash", "geometry", "global_embedding", "model_version", "created_at")
         
-        # Create Iceberg table if it doesn't exist
+        # Create table with matching sort order
         schema_ddl = embeddings_df._jdf.schema().toDDL()
-        create_table = f"""
+        spark.sql(f"""
             CREATE TABLE IF NOT EXISTS sentinel.{output_table} (
                 {schema_ddl}
             ) USING ICEBERG
             PARTITIONED BY (truncate(geohash, 4), month(datetime))
             TBLPROPERTIES (
-                'write.target-file-size-bytes'='134217728',
-                'write.parquet.compression-codec'='zstd'
+                'write.sort-order'='geohash,id,datetime'
             )
-        """
-        print(create_table)
-        spark.sql(create_table)
+        """)
         
-        # Write to Iceberg table
-        embeddings_df.write \
-            .format("iceberg") \
-            .mode("append") \
-            .save(f"sentinel.{output_table}")
+        # Write embeddings with sort order
+        embeddings_df.sortWithinPartitions("geohash", "id", "datetime") \
+            .write.format("iceberg").mode("append").save(f"sentinel.{output_table}")
         
-        processed_count = embeddings_df.count()
+        total_time = time.time() - start_time
+        avg_throughput = total_chips / total_time if total_time > 0 else 0
+        print(f"Completed {total_chips:,} chips in {total_time / 60:.1f}m (avg {avg_throughput:.1f} chips/s)")
         
-        print(f"Successfully processed chips in {(time.time() - start_time) / 60:.1f}m")
-        
-        # Show sample results
-        print("Sample embeddings:")
-        embeddings_df.select("id", "scene_id", "model_version").show(5, truncate=False)
+        print(f"Embedding generation completed for {total_chips:,} chips")
         
     finally:
         spark.stop()

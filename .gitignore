@@ -4,6 +4,7 @@ __pycache__/
 .venv/
 *.egg-info/
 .ipynb_checkpoints/
+uv.lock
 
 # CDK
 cdk.out/

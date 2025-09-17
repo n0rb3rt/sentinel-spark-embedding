@@ -48,16 +48,17 @@ else
   echo "Using cached Clay metadata"
 fi
 
-# Auto-detect architecture for dependency installation if not provided
-INSTALL_ARCH="$ARCH"
-if [ -z "$INSTALL_ARCH" ]; then
-  INSTALL_ARCH=$(python3 -c "import platform; print('cuda' if platform.system() == 'Linux' else 'mps' if platform.system() == 'Darwin' and platform.machine() == 'arm64' else 'cpu')" 2>/dev/null || echo "cpu")
+# Auto-detect architecture if not provided
+if [ -z "$ARCH" ]; then
+  ARCH=$(python3 -c "import torch; print('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')" 2>/dev/null || echo "cpu")
 fi
+
+echo "Using architecture: $ARCH"
 
 if [ "$DEV_MODE" = true ]; then
   # Dev mode: just install locally, skip dist creation
-  echo "Installing dev dependencies locally for $INSTALL_ARCH..."
-  if [ "$INSTALL_ARCH" = "cuda" ]; then
+  echo "Installing dev dependencies locally for $ARCH..."
+  if [ "$ARCH" = "cuda" ]; then
     uv pip install --extra-index-url https://download.pytorch.org/whl/cu121 -e ".[dev]"
   else
     uv pip install -e ".[dev]"
@@ -67,17 +68,13 @@ else
   rm -rf dist
   mkdir -p dist/{venv,lib,model,src}
   
-  # Install build tools
-  echo "Installing build tools..."
-  pip install build
-  
-  # Build wheel
+  # Build wheel using uv (handles build dependencies automatically)
   echo "Building wheel..."
-  python3 -m build --wheel --outdir dist/lib
+  uv build --wheel --out-dir dist/lib
   
   # Install dependencies locally (non-editable for production)
-  echo "Installing build dependencies locally for $INSTALL_ARCH..."
-  if [ "$INSTALL_ARCH" = "cuda" ]; then
+  echo "Installing build dependencies locally for $ARCH..."
+  if [ "$ARCH" = "cuda" ]; then
     uv pip install --extra-index-url https://download.pytorch.org/whl/cu121 ".[build]"
   else
     uv pip install ".[build]"
@@ -87,20 +84,22 @@ else
   if [ ! -f "$VENV_CACHE" ]; then
     echo "Building distributable venv: $DEPS_HASH"
     
-    python3 -m venv /tmp/pack-env
+    python3.12 -m venv /tmp/pack-env
     source /tmp/pack-env/bin/activate
     
-    pip install .
-    if [ "$INSTALL_ARCH" = "cuda" ]; then
-      uv pip install --cache-dir "$CACHE_DIR/pip" \
+    # Use uv consistently for all installations
+    if [ "$ARCH" = "cuda" ]; then
+      /tmp/pack-env/bin/python -m pip install uv
+      /tmp/pack-env/bin/uv pip install --cache-dir "$CACHE_DIR/pip" \
         --extra-index-url https://download.pytorch.org/whl/cu121 \
         .[build]
     else
-      uv pip install --cache-dir "$CACHE_DIR/pip" .[build]
+      /tmp/pack-env/bin/python -m pip install uv
+      /tmp/pack-env/bin/uv pip install --cache-dir "$CACHE_DIR/pip" .[build]
     fi
     
     # Remove our project package, keep only dependencies
-    uv pip uninstall sentinel-processing
+    /tmp/pack-env/bin/uv pip uninstall sentinel-processing
     
     # Pack the base venv
     venv-pack -o "$VENV_CACHE"
@@ -109,12 +108,7 @@ else
   fi
 fi
 
-# Auto-detect architecture if not provided (requires PyTorch)
-if [ -z "$ARCH" ]; then
-  ARCH=$(python3 -c "import torch; print('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')" 2>/dev/null || echo "cpu")
-fi
-
-echo "Building for architecture: $ARCH"
+echo "Building Clay model for architecture: $ARCH"
 
 # Export Clay model for target architecture if not cached
 if [ ! -f "$CACHE_DIR/model/clay-v1.5-encoder-$ARCH.pt2" ]; then

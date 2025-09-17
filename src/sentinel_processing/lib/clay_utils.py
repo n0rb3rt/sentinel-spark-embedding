@@ -4,22 +4,19 @@ Clay compiled model utilities for Spark distribution
 """
 import os
 import torch
-
-class ClayModelSingleton:
-    """Singleton pattern for compiled Clay model - loads once per executor"""
-    _instance = None
-    
-    @classmethod
-    def get_model(cls):
-        if cls._instance is None:
-            cls._instance = load_compiled_clay_model()
-        return cls._instance
+from pathlib import Path
 
 def load_compiled_clay_model():
-    """Load compiled Clay model from distributed locations"""
-    from pathlib import Path
+    """Load compiled Clay model with device placement"""
+    # Auto-detect device
+    if torch.backends.mps.is_available():
+        device = torch.device('mps')
+    elif torch.cuda.is_available():
+        device = torch.device('cuda')
+    else:
+        device = torch.device('cpu')
     
-    # Try device-specific models in preference order
+    # Find model file
     base_paths = [
         '/mnt1/opt/clay-model/',
         str(Path(__file__).parent.parent.parent.parent / ".cache/model/"),
@@ -27,38 +24,28 @@ def load_compiled_clay_model():
     
     model_path = None
     for base_path in base_paths:
-        cuda_path = os.path.join(base_path, "clay-v1.5-encoder-cuda.pt2")
-        mps_path = os.path.join(base_path, "clay-v1.5-encoder-mps.pt2")
-        cpu_path = os.path.join(base_path, "clay-v1.5-encoder-cpu.pt2")
-        
-        if os.path.exists(cuda_path):
-            model_path = cuda_path
-            break
-        elif os.path.exists(mps_path):
-            model_path = mps_path
-            break
-        elif os.path.exists(cpu_path):
-            model_path = cpu_path
+        for device_type in ['cuda', 'mps', 'cpu']:
+            path = os.path.join(base_path, f"clay-v1.5-encoder-{device_type}.pt2")
+            if os.path.exists(path):
+                model_path = path
+                break
+        if model_path:
             break
     
-    if model_path is None:
-        raise FileNotFoundError(f"Compiled Clay model not found in any of: {base_paths}")
+    if not model_path:
+        raise FileNotFoundError(f"Clay model not found in: {base_paths}")
     
-    print(f"Loading compiled Clay model from: {model_path}")
-    model = torch.export.load(str(model_path)).module()
-    print("Compiled Clay model loaded successfully")
-    return model
+    print(f"Loading Clay model from: {model_path} on {device}")
+    return torch.export.load(str(model_path)).module().to(device)
 
 def load_clay_metadata():
-    """Load Clay metadata from distributed archive or local file"""
+    """Load Clay metadata configuration"""
     from omegaconf import OmegaConf
     import yaml
-    from pathlib import Path
     
-    # Try multiple locations - cache first for local dev
     paths = [
-        Path(__file__).parent.parent.parent.parent / ".cache/model/configs/metadata.yaml",  # Local cache
-        '/mnt1/opt/clay-model/configs/metadata.yaml',  # Pre-staged from bootstrap
+        Path(__file__).parent.parent.parent.parent / ".cache/model/configs/metadata.yaml",
+        '/mnt1/opt/clay-model/configs/metadata.yaml',
     ]
     
     for path in paths:
@@ -66,4 +53,14 @@ def load_clay_metadata():
             with open(path) as f:
                 return OmegaConf.create(yaml.safe_load(f))
     
-    raise FileNotFoundError("Clay metadata not found in archive or local directory")
+    raise FileNotFoundError("Clay metadata not found")
+
+class ClayModelSingleton:
+    """Singleton for Clay model - loads once per executor"""
+    _instance = None
+    
+    @classmethod
+    def get_model(cls):
+        if cls._instance is None:
+            cls._instance = load_compiled_clay_model()
+        return cls._instance
