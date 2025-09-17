@@ -14,9 +14,7 @@ def create_sedona_session(app_name="SentinelProcessing"):
     if hasattr(CONFIG, 'spark'):
         print(f"Applying Spark configs: {CONFIG.spark}")
         flattened_config = dict(_flatten_config(CONFIG.spark))
-        print(f"Flattened config: {flattened_config}")
         
-        # Use individual .set() calls instead of .setAll()
         spark_conf = SparkConf()
         for key, value in flattened_config.items():
             spark_conf.set(key, value)

@@ -68,16 +68,22 @@ def main():
             .repartition("scene_id", "datetime")
             
         
-        print(f"Found {scene_chip_pairs.count()} chips")
+        total_pairs = scene_chip_pairs.count()
+        print(f"Found {total_pairs:,} scene-chip pairs to process")
         
         # 4. Process chips with tensor-optimized Clay processing
-        print("Processing scene-chip pairs...")
+        print(f"Processing {total_pairs:,} scene-chip pairs...")
+        processing_start = time.time()
+        
         normalized_chips = scene_chip_pairs.groupBy("scene_id", "datetime", "region_id") \
             .applyInPandas(
                 lambda df: SceneChipProcessor.process(df, broadcast_urls),
                 SceneChipProcessor.schema
             ).sortWithinPartitions("geohash", "id", "datetime") \
             .withColumn("created_at", current_timestamp())
+        
+        processing_time = time.time() - processing_start
+        print(f"Chip processing completed in {processing_time / 60:.1f}m")
 
         spark.sql("CREATE DATABASE IF NOT EXISTS sentinel")
 
@@ -99,7 +105,8 @@ def main():
         # Write to Iceberg table
         normalized_chips.writeTo(f"sentinel.{table_name}").append()
         
-        print(f"Successfully processed chips in {(time.time() - start_time) / 60:.1f}m")
+        total_time = time.time() - start_time
+        print(f"Chip extraction completed in {total_time / 60:.1f}m")
         
     finally:
         spark.stop()
