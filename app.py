@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 import aws_cdk as cdk
-from src.infra.sentinel_stack import SentinelProcessingStack
-from src.infra.emr_gpu_stack import EMRGPUStack
+from src.infra.stack import SentinelStack
 
 app = cdk.App()
 
 env = cdk.Environment(account="121891376456", region="us-east-2")
 
-# Main processing stack
-SentinelProcessingStack(app, "SentinelProcessingStack", env=env)
-
-# EMR GPU stack (optional)
-EMRGPUStack(app, "SentinelEMRGPUStack", env=env)
+# Sentinel stack with existing VPC
+SentinelStack(
+    app, "SentinelProcessingStack", 
+    vpc_id=None, # provide existing ID or None to create new
+    env=env
+)
 
 app.synth()
