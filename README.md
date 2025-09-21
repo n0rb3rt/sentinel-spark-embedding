@@ -21,25 +21,15 @@ This project creates an AWS infrastructure for processing Sentinel-2 satellite i
 
 2. Install for development (includes PySpark for local testing):
    ```bash
-   # Auto-detect architecture and install dev dependencies
-   ./scripts/install.sh
-   
-   # Or specify architecture explicitly
-   ./scripts/install.sh --arch cuda    # For CUDA development
-   ./scripts/install.sh --arch mps     # For Apple Silicon
-   ./scripts/install.sh --arch cpu     # For CPU-only
+   # Install dev dependencies (specify architecture: cuda, mps, or cpu)
+   ./scripts/install.sh --arch cuda
    ```
 
 ## Production Build & Deployment
 
 1. Build distribution assets for deployment:
    ```bash
-   # Auto-detect architecture and create distribution
    ./scripts/build.sh
-   
-   # Or specify target architecture
-   ./scripts/build.sh --arch cuda    # For EMR/GPU deployment
-   ./scripts/build.sh --arch cpu     # For CPU-only deployment
    ```
 
    The build process:
