@@ -31,9 +31,8 @@ class SceneChipProcessor:
         StructField("datetime", TimestampType()),
         StructField("scene_id", StringType()),
         StructField("geohash", StringType()),
-        StructField("scl_mean", FloatType()),  # SCL band mean for cloud filtering
+        StructField("cloud_free_ratio", FloatType()),  # Cloud-free pixel ratio for filtering
         StructField("clay_tensor", BinaryType()),  # np.savez_compressed blob
-        StructField("geotiff", BinaryType()),  # GeoTIFF blob for visualization
         StructField("geometry", BinaryType())  # WKB polygon geometry
     ])
     
@@ -55,21 +54,17 @@ class SceneChipProcessor:
         
         return target_array
     
+
+    
     @staticmethod
-    def _create_geotiff_blob(raw_chip_data, chip_bounds):
-        """Create GeoTIFF blob from raw uint16 chip data"""
-        transform = from_bounds(*chip_bounds, CHIP_PIXELS, CHIP_PIXELS)
-        
-        buffer = BytesIO()
-        with rasterio.open(
-            buffer, 'w', driver='GTiff',
-            height=CHIP_PIXELS, width=CHIP_PIXELS, count=raw_chip_data.shape[0],
-            dtype=np.uint16, crs='EPSG:4326', transform=transform,
-            compress='lzw'
-        ) as dst:
-            dst.write(raw_chip_data)
-        
-        return buffer.getvalue()
+    def _calculate_cloud_free_ratio(scl_chip):
+        """Calculate cloud-free ratio using SCL classes 4,5,6 (vegetation, not_vegetated, water)"""
+        cloud_free_classes = [4, 5, 6]
+        valid_pixels = scl_chip[scl_chip > 0]  # Exclude nodata
+        if valid_pixels.size == 0:
+            return 0.0
+        cloud_free_pixels = np.isin(valid_pixels, cloud_free_classes).sum()
+        return float(cloud_free_pixels / valid_pixels.size)
     
     @staticmethod
     def _create_clay_tensor_blob(normalized_chip, latlon_array, time_array, waves_array, gsd_array):
@@ -124,24 +119,47 @@ class SceneChipProcessor:
             
             # Use rasterio for precise region extraction
             tile_pixels = REGION_SIZE * CHIP_PIXELS
-            region_array = np.empty((len(BANDS), tile_pixels, tile_pixels), dtype=np.uint16)
+            max_cloud_cover = CONFIG.jobs.chip_extraction.max_cloud_cover_percent
+            
+            # Pass 1: Extract SCL band only for cloud filtering
+            scl_region = np.empty((tile_pixels, tile_pixels), dtype=np.uint16)
+            
+            with rasterio.Env(**CONFIG.rasterio):
+                with rasterio.open(urls['scl_s3']) as scl_src:
+                    scl_region = SceneChipProcessor._extract_reprojected_region(scl_src, region_bounds, tile_pixels)
+            
+            # Filter chips by cloud coverage
+            valid_chips = []
+            for _, chip in df.iterrows():
+                x, y = int(chip['chip_start_x']), int(chip['chip_start_y'])
+                scl_chip = scl_region[y:y+CHIP_PIXELS, x:x+CHIP_PIXELS]
+                cloud_free_ratio = SceneChipProcessor._calculate_cloud_free_ratio(scl_chip)
+                
+                if cloud_free_ratio >= (1.0 - max_cloud_cover):
+                    valid_chips.append((chip, cloud_free_ratio))
+            
+            if not valid_chips:
+                print(f"No valid chips found for region {region_id} (all too cloudy)")
+                return pd.DataFrame()
+            
+            print(f"Found {len(valid_chips)}/{len(df)} valid chips after cloud filtering")
+            
+            # Pass 2: Extract spectral bands only and normalize in place
+            region_array = np.empty((4, tile_pixels, tile_pixels), dtype=np.float32)
             
             with rasterio.Env(**CONFIG.rasterio):
                 with ExitStack() as stack:
-                    # Open bands for reading
-                    sources = [stack.enter_context(rasterio.open(urls[f'{band}_s3'])) for band in BANDS]
+                    # Open spectral bands for reading (first 4 bands)
+                    sources = [stack.enter_context(rasterio.open(urls[f'{band}_s3'])) for band in BANDS[:4]]
                     
-                    # Extract region using rasterio range reads
+                    # Extract and normalize in place
                     for i, src in enumerate(sources):
-                        region_array[i] = SceneChipProcessor._extract_reprojected_region(src, region_bounds, tile_pixels)
+                        raw_band = SceneChipProcessor._extract_reprojected_region(src, region_bounds, tile_pixels)
+                        region_array[i] = (raw_band.astype(np.float32) - clay_means[i]) / clay_stds[i]
             
-            # Normalize only spectral bands (first 4) for Clay processing
-            normalized_region = (region_array[:4].astype(np.float32) - clay_means[:, None, None]) / clay_stds[:, None, None]
-            
-            # Extract chips (only lat/lon varies)
-            for _, chip in df.iterrows():
+            # Extract chips (only valid chips after cloud filtering)
+            for chip, cloud_free_ratio in valid_chips:
                 x, y = int(chip['chip_start_x']), int(chip['chip_start_y'])
-                chip_bounds = (chip['minx'], chip['miny'], chip['maxx'], chip['maxy'])
                 chip_lat, chip_lon = chip['chip_center_lat'], chip['chip_center_lon']
                 
                 lat_rad = chip_lat * np.pi / 180
@@ -150,17 +168,15 @@ class SceneChipProcessor:
                 latlon_array = np.array([math.sin(lat_rad), math.cos(lat_rad), math.sin(lon_rad), math.cos(lon_rad)], dtype=np.float32)
                 
                 # Extract chip data
-                raw_chip = region_array[:, y:y+CHIP_PIXELS, x:x+CHIP_PIXELS]
-                normalized_chip = normalized_region[:, y:y+CHIP_PIXELS, x:x+CHIP_PIXELS]
+                normalized_chip = region_array[:, y:y+CHIP_PIXELS, x:x+CHIP_PIXELS]
                 
                 results.append({
                     'id': chip['chip_id'],
                     'datetime': chip['datetime'],
                     'scene_id': chip['scene_id'],
                     'geohash': chip['geohash'],
-                    'scl_mean': float(np.mean(raw_chip[4])),
+                    'cloud_free_ratio': cloud_free_ratio,
                     'clay_tensor': SceneChipProcessor._create_clay_tensor_blob(normalized_chip, latlon_array, time_array, waves_array, gsd_array),
-                    'geotiff': SceneChipProcessor._create_geotiff_blob(raw_chip, chip_bounds),
                     'geometry': chip['chip_wkb']  
                 })
                 

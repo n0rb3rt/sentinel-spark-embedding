@@ -20,12 +20,8 @@ def make_clay_predict_fn(expected_batches):
     model = ClayModelSingleton.get_model()
     device = next(model.parameters()).device
     
-    batch_count = 0
-    
     def predict(clay_tensors: np.ndarray) -> np.ndarray:
         """Predict embeddings for batch of clay tensors"""
-        nonlocal batch_count
-        batch_count += 1
         batch_start = time.time()
         
         try:

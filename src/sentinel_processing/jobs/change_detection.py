@@ -12,7 +12,7 @@ from sentinel_processing.config import CONFIG, get_ssm_parameter
 from sentinel_processing.lib.sedona_utils import create_sedona_session
 
 def compute_change_scores(chip_group: pd.DataFrame) -> pd.DataFrame:
-    """Compute cosine similarity to previous observation for each chip location"""
+    """Compute change scores (cosine similarity) to previous observation for each chip location"""
     
     # Sort by datetime
     chip_group = chip_group.sort_values('datetime').reset_index(drop=True)
@@ -21,29 +21,35 @@ def compute_change_scores(chip_group: pd.DataFrame) -> pd.DataFrame:
         """Compute cosine similarity between two vectors"""
         if a is None or b is None:
             return None
-        a = np.array(a)
-        b = np.array(b)
+        a = np.array(a, dtype=np.float32)
+        b = np.array(b, dtype=np.float32)
+        
+        # Normalize vectors
         norm_a = np.linalg.norm(a)
         norm_b = np.linalg.norm(b)
         if norm_a == 0 or norm_b == 0:
             return 0.0
-        similarity = np.dot(a, b) / (norm_a * norm_b)
+            
+        a_norm = a / norm_a
+        b_norm = b / norm_b
+        similarity = np.dot(a_norm, b_norm)
         return float(np.clip(similarity, -1.0, 1.0))  # Clamp to valid range
     
-    # Compute similarities
-    similarities = []
+    # Compute change scores (cosine distance - low values = similar, high values = different)
+    change_scores = []
     for i in range(len(chip_group)):
         if i == 0:
-            similarities.append(0.0)  # First observation is baseline
+            change_scores.append(0.0)  # First observation baseline
         else:
             curr_embedding = chip_group.iloc[i]['embedding']
             prev_embedding = chip_group.iloc[i-1]['embedding']
             sim = cosine_similarity(curr_embedding, prev_embedding)
-            similarities.append(sim)
+            change_score = 1.0 - sim if sim is not None else 0.0
+            change_scores.append(change_score)
     
     # Create result with new columns
     return chip_group.assign(
-        change_score=similarities
+        change_score=change_scores
     )
 
 def main():

@@ -11,6 +11,8 @@ This project creates an AWS infrastructure for processing Sentinel-2 satellite i
 - **Clay GeoFM**: Foundation model for generating embeddings from satellite imagery
 - **PySpark Jobs**: Complete pipeline from chip extraction to vector search ingestion
 
+![Architecture](docs/images/architecture_diagram.png)
+
 ## Development Setup
 
 1. Create virtual environment:

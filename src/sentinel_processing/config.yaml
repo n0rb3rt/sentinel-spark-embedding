@@ -29,6 +29,7 @@ jobs:
     region_size_chips: 12
     start_date: "2024-05-16"
     end_date: "2024-05-31"
+    max_cloud_cover_percent: 0.15  # 15% cloud cover threshold
     
     # Job requirements
     spark:
@@ -66,6 +67,15 @@ jobs:
     # Job requirements
     spark:
       packages: ["org.opensearch:opensearch-hadoop:1.0.1"]
+      include_model: false
+      
+  visualization:
+    # Job parameters
+    output_file: "sentinel_visualization.html"
+    
+    # Job requirements
+    spark:
+      packages: ["org.apache.sedona:sedona-spark-3.5_2.12:1.7.2", "org.datasyslab:geotools-wrapper:1.7.2-28.5"]
       include_model: false
 
 # local dev

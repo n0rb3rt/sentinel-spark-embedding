@@ -133,11 +133,7 @@
                 <input type="text" id="scene-filter" placeholder="Filter by scene ID">
             </div>
             
-            <div class="filter-group">
-                <label>SCL Mean (Cloud Filter):</label>
-                <input type="range" id="max-scl" min="0" max="10" step="0.1" value="10">
-                <span id="scl-value">≤ 10.0</span>
-            </div>
+
             
             <div class="filter-buttons">
                 <button class="apply-btn" onclick="applyFilters()">Apply</button>
@@ -183,8 +179,7 @@
         const minChangeEl = document.getElementById('min-change');
         const changeValueEl = document.getElementById('change-value');
         const sceneFilterEl = document.getElementById('scene-filter');
-        const maxSclEl = document.getElementById('max-scl');
-        const sclValueEl = document.getElementById('scl-value');
+
         
         // Date range state
         let minDate = null;
@@ -197,10 +192,7 @@
             changeValueEl.textContent = `≥ ${minChangeEl.value}`;
         });
         
-        // Update SCL display
-        maxSclEl.addEventListener('input', () => {
-            sclValueEl.textContent = `≤ ${maxSclEl.value}`;
-        });
+
         
         // Initialize date range from data
         async function initializeDateRange() {
@@ -322,16 +314,7 @@
                     });
                 }
                 
-                // SCL mean filter (cloud filtering)
-                if (parseFloat(maxSclEl.value) < 10) {
-                    filters.push({
-                        range: {
-                            scl_mean: {
-                                lte: parseFloat(maxSclEl.value)
-                            }
-                        }
-                    });
-                }
+
                 
                 const query = {
                     size: 10000,
@@ -344,13 +327,9 @@
                     aggs: {
                         total_chips: { value_count: { field: "id" } },
                         change_stats: { stats: { field: "change_score" } },
-                        scl_stats: { stats: { field: "scl_mean" } },
                         scene_count: { cardinality: { field: "scene_id" } },
                         high_change: {
                             filter: { range: { change_score: { gte: 0.5 } } }
-                        },
-                        clear_chips: {
-                            filter: { range: { scl_mean: { lte: 3.0 } } }
                         }
                     }
                 };
@@ -374,7 +353,6 @@
                 // Display aggregated statistics
                 const aggs = data.aggregations;
                 const changeStats = aggs.change_stats;
-                const sclStats = aggs.scl_stats;
                 
                 statusEl.textContent = 'Ready';
                 statusEl.className = '';
@@ -382,10 +360,8 @@
                     <strong>Dataset Statistics:</strong><br>
                     Total: ${aggs.total_chips.value.toLocaleString()} chips<br>
                     Scenes: ${aggs.scene_count.value} unique<br>
-                    Change Score: avg ${changeStats.avg.toFixed(3)}, max ${changeStats.max.toFixed(3)}<br>
-                    High Change: ${aggs.high_change.doc_count} chips (≥0.5)<br>
-                    Clear Sky: ${aggs.clear_chips.doc_count} chips (SCL≤3.0)<br>
-                    SCL Range: ${sclStats.min.toFixed(1)} - ${sclStats.max.toFixed(1)}
+                    Change Score: avg ${(changeStats.avg || 0).toFixed(3)}, max ${(changeStats.max || 0).toFixed(3)}<br>
+                    High Change: ${aggs.high_change.doc_count} chips (≥0.5)
                 `;
                 
             } catch (error) {
@@ -420,7 +396,7 @@
                 polygon.bindTooltip(`
                     ID: ${chip.id}<br>
                     Scene: ${chip.scene_id}<br>
-                    Change Score: ${chip.change_score.toFixed(3)}<br>
+                    Change Score: ${(chip.change_score || 0).toFixed(3)}<br>
                     Date: ${new Date(chip['@timestamp']).toLocaleDateString()}
                 `);
             });
@@ -428,10 +404,11 @@
         
         // Color chips based on change score
         function getChipColor(changeScore) {
-            if (changeScore > 0.8) return '#ff0000';      // High change - red
-            if (changeScore > 0.5) return '#ff8800';      // Medium change - orange  
-            if (changeScore > 0.2) return '#ffff00';      // Low change - yellow
-            return '#00ff00';                             // No change - green
+            const score = changeScore || 0;
+            if (score > 0.8) return '#ff0000';      // High change - red
+            if (score > 0.5) return '#ff8800';      // Medium change - orange  
+            if (score > 0.2) return '#ffff00';      // Low change - yellow
+            return '#00ff00';                        // No change - green
         }
         
         // Utility functions for TiTiler
@@ -478,7 +455,7 @@
                     ID: ${chip.id}<br>
                     Geohash: ${chip.geohash}<br>
                     Date: ${new Date(chip['@timestamp']).toLocaleDateString()}<br>
-                    Change Score: ${chip.change_score.toFixed(3)}<br>
+                    Change Score: ${(chip.change_score || 0).toFixed(3)}<br>
                     <button onclick="findSimilar('${chip.id}')" style="margin-top: 10px; padding: 5px 10px; background: #007cba; color: white; border: none; border-radius: 3px; cursor: pointer;">Find Similar</button>
                 </div>
             `;
@@ -508,7 +485,7 @@
                         <div style="flex-shrink: 0; text-align: center; padding: 5px; border-radius: 5px; ${isSelected ? 'background: #e8f4f8; border: 2px solid #007cba;' : 'border: 1px solid #ddd;'}">
                             <img src="${thumbUrl}" style="width: 120px; height: 120px; border-radius: 3px; display: block;" onerror="this.style.background='#f0f0f0'; this.alt='No preview';">
                             <div style="font-size: 10px; margin-top: 5px;">${new Date(obs['@timestamp']).toLocaleDateString()}</div>
-                            <div style="font-size: 10px; color: ${getChangeColor(obs.change_score)}; font-weight: bold;">Δ${obs.change_score.toFixed(3)}</div>
+                            <div style="font-size: 10px; color: ${getChangeColor(obs.change_score || 0)}; font-weight: bold;">Δ${(obs.change_score || 0).toFixed(3)}</div>
                         </div>
                     `;
                 }).join('');
@@ -555,9 +532,10 @@
         
         // Color code change scores
         function getChangeColor(score) {
-            if (score > 0.8) return '#ff0000';
-            if (score > 0.5) return '#ff8800';
-            if (score > 0.2) return '#ffaa00';
+            const changeScore = score || 0;
+            if (changeScore > 0.8) return '#ff0000';
+            if (changeScore > 0.5) return '#ff8800';
+            if (changeScore > 0.2) return '#ffaa00';
             return '#666666';
         }
         
@@ -642,8 +620,6 @@
             minChangeEl.value = '0';
             changeValueEl.textContent = '≥ 0.0';
             sceneFilterEl.value = '';
-            maxSclEl.value = '10';
-            sclValueEl.textContent = '≤ 10.0';
             queryChips();
         }
         
