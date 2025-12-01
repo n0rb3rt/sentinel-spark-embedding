@@ -10,7 +10,7 @@ from io import BytesIO
 from pyspark.sql.functions import current_timestamp, lit, col
 from pyspark.sql.types import ArrayType, FloatType
 from pyspark.ml.functions import predict_batch_udf
-from sentinel_processing.config import CONFIG
+from sentinel_processing.config import CONFIG, get_ssm_parameter
 from sentinel_processing.lib.sedona_utils import create_sedona_session
 from sentinel_processing.lib.clay_utils import ClayModelSingleton
 
@@ -20,12 +20,8 @@ def make_clay_predict_fn(expected_batches):
     model = ClayModelSingleton.get_model()
     device = next(model.parameters()).device
     
-    batch_count = 0
-    
     def predict(clay_tensors: np.ndarray) -> np.ndarray:
         """Predict embeddings for batch of clay tensors"""
-        nonlocal batch_count
-        batch_count += 1
         batch_start = time.time()
         
         try:
@@ -70,7 +66,8 @@ def main():
     batch_size = CONFIG.jobs.embedding_generation.get('batch_size', 32)
     
     try:
-        chips_df = spark.read.format("iceberg").load(f"sentinel.{input_table}")
+        database_name = CONFIG.sentinel.database_name
+        chips_df = spark.read.format("iceberg").load(f"{database_name}.{input_table}")
         total_chips = chips_df.count()
         expected_batches = (total_chips + batch_size - 1) // batch_size  # Ceiling division
         print(f"Processing {total_chips:,} chips with batch size {batch_size}")
@@ -84,15 +81,16 @@ def main():
         )
         
         embeddings_df = chips_df \
-            .withColumn("global_embedding", clay_udf("clay_tensor")) \
+            .withColumn("embedding", clay_udf("clay_tensor")) \
             .withColumn("model_version", lit("clay-v1.5")) \
             .withColumn("created_at", current_timestamp()) \
-            .select("id", "scene_id", "datetime", "geohash", "geometry", "global_embedding", "model_version", "created_at")
+            .select("id", "geohash", "datetime", "embedding", "model_version", "created_at") \
+            .sortWithinPartitions("geohash", "id", "datetime")
         
-        # Create table with matching sort order
+        # Create minimal embeddings table
         schema_ddl = embeddings_df._jdf.schema().toDDL()
         spark.sql(f"""
-            CREATE TABLE IF NOT EXISTS sentinel.{output_table} (
+            CREATE TABLE IF NOT EXISTS {database_name}.{output_table} (
                 {schema_ddl}
             ) USING ICEBERG
             PARTITIONED BY (truncate(geohash, 4), month(datetime))
@@ -101,9 +99,8 @@ def main():
             )
         """)
         
-        # Write embeddings with sort order
-        embeddings_df.sortWithinPartitions("geohash", "id", "datetime") \
-            .write.format("iceberg").mode("append").save(f"sentinel.{output_table}")
+        # Write embeddings
+        embeddings_df.write.format("iceberg").mode("append").save(f"{database_name}.{output_table}")
         
         total_time = time.time() - start_time
         avg_throughput = total_chips / total_time if total_time > 0 else 0

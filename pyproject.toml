@@ -37,15 +37,19 @@ embedding = [
     "claymodel @ git+https://github.com/Clay-foundation/model.git"
 ]
 
+ingestion = [
+    "opensearch-py==3.0.0"
+]
+
 # Deploy CDK stack
 deploy = [
-    "aws-cdk-lib==2.100.0",
-    "constructs==10.3.0"
+    "aws-cdk-lib==2.215.0",
+    "constructs==10.4.2"
 ]
 
 # Build jobs and their dependencies
 build = [
-    "sentinel-processing[extraction,embedding]"
+    "sentinel-processing[extraction,embedding,ingestion]"
 ]
 
 # Local dev environment

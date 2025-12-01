@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Sentinel Chip Explorer</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; font-family: Arial, sans-serif; }
+        #map { height: 100vh; }
+        .info-panel {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 320px;
+            background: white;
+            padding: 15px;
+            border-radius: 5px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+            z-index: 1000;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        .filters {
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #f9f9f9;
+            border-radius: 3px;
+        }
+        .filter-group {
+            margin-bottom: 10px;
+        }
+        .filter-group label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 3px;
+            font-size: 12px;
+        }
+        .filter-group input, .filter-group select {
+            width: 100%;
+            padding: 4px;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+        .filter-buttons {
+            display: flex;
+            gap: 5px;
+        }
+        .filter-buttons button {
+            flex: 1;
+            padding: 6px;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+        }
+        .apply-btn { background: #007cba; color: white; }
+        .clear-btn { background: #666; color: white; }
+        .chip-info {
+            margin: 10px 0;
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 3px;
+        }
+        #chip-count {
+            font-size: 11px;
+            line-height: 1.3;
+            margin: 10px 0;
+            padding: 8px;
+            background: #e8f4f8;
+            border-radius: 3px;
+            border-left: 3px solid #007cba;
+        }
+        .loading { color: #666; font-style: italic; }
+        .date-slider-container {
+            position: relative;
+        }
+        .multi-range {
+            -webkit-appearance: none;
+            appearance: none;
+            height: 6px;
+            background: #ddd;
+            border-radius: 3px;
+            outline: none;
+        }
+        .multi-range::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            background: #007cba;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+        .date-labels {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 5px;
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <div id="timeline" style="position: absolute; bottom: 0; left: 0; right: 0; height: 180px; background: white; border-top: 2px solid #007cba; display: none; z-index: 1000; overflow-x: auto; overflow-y: hidden; padding: 10px;">
+        <div style="display: flex; align-items: center; gap: 10px; height: 100%;" id="timeline-content"></div>
+    </div>
+    <div class="info-panel">
+        <h3>Sentinel Chip Explorer</h3>
+        
+        <div class="filters">
+            <div class="filter-group">
+                <label>Date Range:</label>
+                <div class="date-slider-container">
+                    <input type="range" id="date-range" min="0" max="100" value="0,100" class="multi-range">
+                    <div class="date-labels">
+                        <span id="start-date-label">Loading...</span>
+                        <span id="end-date-label">Loading...</span>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="filter-group">
+                <label>Change Score:</label>
+                <input type="range" id="min-change" min="0" max="1" step="0.1" value="0">
+                <span id="change-value">≥ 0.0</span>
+            </div>
+            
+            <div class="filter-group">
+                <label>Scene ID:</label>
+                <input type="text" id="scene-filter" placeholder="Filter by scene ID">
+            </div>
+            
+
+            
+            <div class="filter-buttons">
+                <button class="apply-btn" onclick="applyFilters()">Apply</button>
+                <button class="clear-btn" onclick="clearFilters()">Clear</button>
+            </div>
+        </div>
+        
+        <div id="status">Pan and zoom to explore chips</div>
+        <div id="chip-count"></div>
+        <div id="selected-chip"></div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Initialize map
+        const map = L.map('map').setView([-10.5, -61.5], 10);
+        
+        // Add Google Satellite base layer (fallback)
+        const titilerUrl = 'http://localhost:8000';
+        
+        L.tileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+            attribution: 'Google Satellite',
+            maxZoom: 18
+        }).addTo(map);
+        
+        // Layer for chip geometries
+        let chipLayer = L.layerGroup().addTo(map);
+        
+        // OpenSearch configuration
+        const OPENSEARCH_URL = 'https://localhost:8443/sentinel/_search';
+        const MASTER_USER = 'admin'; // Replace with actual credentials
+        const MASTER_PASS = 'S34rch-M3?'; // Replace with actual credentials
+        
+        // Status elements
+        const statusEl = document.getElementById('status');
+        const countEl = document.getElementById('chip-count');
+        const selectedEl = document.getElementById('selected-chip');
+        
+        // Filter elements
+        const dateRangeEl = document.getElementById('date-range');
+        const startDateLabelEl = document.getElementById('start-date-label');
+        const endDateLabelEl = document.getElementById('end-date-label');
+        const minChangeEl = document.getElementById('min-change');
+        const changeValueEl = document.getElementById('change-value');
+        const sceneFilterEl = document.getElementById('scene-filter');
+
+        
+        // Date range state
+        let minDate = null;
+        let maxDate = null;
+        let selectedStartDate = null;
+        let selectedEndDate = null;
+        
+        // Update change score display
+        minChangeEl.addEventListener('input', () => {
+            changeValueEl.textContent = `≥ ${minChangeEl.value}`;
+        });
+        
+
+        
+        // Initialize date range from data
+        async function initializeDateRange() {
+            try {
+                const query = {
+                    size: 0,
+                    aggs: {
+                        date_range: {
+                            stats: {
+                                field: "@timestamp"
+                            }
+                        }
+                    }
+                };
+                
+                const response = await fetch(OPENSEARCH_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Basic ' + btoa(MASTER_USER + ':' + MASTER_PASS)
+                    },
+                    body: JSON.stringify(query)
+                });
+                
+                const data = await response.json();
+                const stats = data.aggregations.date_range;
+                
+                minDate = new Date(stats.min);
+                maxDate = new Date(stats.max);
+                selectedStartDate = minDate;
+                selectedEndDate = maxDate;
+                
+                startDateLabelEl.textContent = minDate.toLocaleDateString();
+                endDateLabelEl.textContent = maxDate.toLocaleDateString();
+                
+                dateRangeEl.min = 0;
+                dateRangeEl.max = 100;
+                dateRangeEl.value = 0;
+                
+            } catch (error) {
+                console.error('Error getting date range:', error);
+                startDateLabelEl.textContent = 'Error';
+                endDateLabelEl.textContent = 'Error';
+            }
+        }
+        
+        // Handle date range slider
+        dateRangeEl.addEventListener('input', () => {
+            if (!minDate || !maxDate) return;
+            
+            const percent = parseFloat(dateRangeEl.value) / 100;
+            const totalMs = maxDate.getTime() - minDate.getTime();
+            
+            selectedStartDate = new Date(minDate.getTime() + (totalMs * percent * 0.8));
+            selectedEndDate = new Date(minDate.getTime() + (totalMs * (percent + 0.2)));
+            
+            if (selectedEndDate > maxDate) selectedEndDate = maxDate;
+            
+            startDateLabelEl.textContent = selectedStartDate.toLocaleDateString();
+            endDateLabelEl.textContent = selectedEndDate.toLocaleDateString();
+        });
+        
+        // Query OpenSearch for chips in current map bounds
+        async function queryChips() {
+            const bounds = map.getBounds();
+            const bbox = [
+                bounds.getWest(),
+                bounds.getSouth(), 
+                bounds.getEast(),
+                bounds.getNorth()
+            ];
+            
+            statusEl.textContent = 'Loading chips...';
+            statusEl.className = 'loading';
+            
+            try {
+                // Build query filters
+                const filters = [{
+                    geo_shape: {
+                        geometry: {
+                            shape: {
+                                type: "envelope",
+                                coordinates: [[bbox[0], bbox[3]], [bbox[2], bbox[1]]]
+                            },
+                            relation: "intersects"
+                        }
+                    }
+                }];
+                
+                // Date range filter
+                if (selectedStartDate && selectedEndDate) {
+                    filters.push({
+                        range: {
+                            "@timestamp": {
+                                gte: selectedStartDate.getTime(),
+                                lte: selectedEndDate.getTime()
+                            }
+                        }
+                    });
+                }
+                
+                // Change score filter
+                if (parseFloat(minChangeEl.value) > 0) {
+                    filters.push({
+                        range: {
+                            change_score: {
+                                gte: parseFloat(minChangeEl.value)
+                            }
+                        }
+                    });
+                }
+                
+                // Scene ID filter
+                if (sceneFilterEl.value.trim()) {
+                    filters.push({
+                        wildcard: {
+                            scene_id: `*${sceneFilterEl.value.trim()}*`
+                        }
+                    });
+                }
+                
+
+                
+                const query = {
+                    size: 10000,
+                    query: {
+                        bool: {
+                            filter: filters
+                        }
+                    },
+                    _source: ["id", "scene_id", "@timestamp", "geohash", "change_score", "geometry"],
+                    aggs: {
+                        total_chips: { value_count: { field: "id" } },
+                        change_stats: { stats: { field: "change_score" } },
+                        scene_count: { cardinality: { field: "scene_id" } },
+                        high_change: {
+                            filter: { range: { change_score: { gte: 0.5 } } }
+                        }
+                    }
+                };
+                
+                const response = await fetch(OPENSEARCH_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Basic ' + btoa(MASTER_USER + ':' + MASTER_PASS)
+                    },
+                    body: JSON.stringify(query)
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+                
+                const data = await response.json();
+                displayChips(data.hits.hits);
+                
+                // Display aggregated statistics
+                const aggs = data.aggregations;
+                const changeStats = aggs.change_stats;
+                
+                statusEl.textContent = 'Ready';
+                statusEl.className = '';
+                countEl.innerHTML = `
+                    <strong>Dataset Statistics:</strong><br>
+                    Total: ${aggs.total_chips.value.toLocaleString()} chips<br>
+                    Scenes: ${aggs.scene_count.value} unique<br>
+                    Change Score: avg ${(changeStats.avg || 0).toFixed(3)}, max ${(changeStats.max || 0).toFixed(3)}<br>
+                    High Change: ${aggs.high_change.doc_count} chips (≥0.5)
+                `;
+                
+            } catch (error) {
+                console.error('Error querying chips:', error);
+                statusEl.textContent = 'Error loading chips';
+                statusEl.className = '';
+                countEl.textContent = '';
+            }
+        }
+        
+        // Display chip geometries on map
+        function displayChips(hits) {
+            chipLayer.clearLayers();
+            
+            hits.forEach(hit => {
+                const chip = hit._source;
+                const coords = chip.geometry.coordinates[0];
+                
+                // Convert coordinates to Leaflet format
+                const latLngs = coords.map(coord => [coord[1], coord[0]]);
+                
+                const polygon = L.polygon(latLngs, {
+                    color: getChipColor(chip.change_score),
+                    weight: 1,
+                    fillOpacity: 0.3
+                }).addTo(chipLayer);
+                
+                // Add click handler
+                polygon.on('click', () => selectChip(chip));
+                
+                // Add tooltip (simplified without thumbnails for now)
+                polygon.bindTooltip(`
+                    ID: ${chip.id}<br>
+                    Scene: ${chip.scene_id}<br>
+                    Change Score: ${(chip.change_score || 0).toFixed(3)}<br>
+                    Date: ${new Date(chip['@timestamp']).toLocaleDateString()}
+                `);
+            });
+        }
+        
+        // Color chips based on change score
+        function getChipColor(changeScore) {
+            const score = changeScore || 0;
+            if (score > 0.8) return '#ff0000';      // High change - red
+            if (score > 0.5) return '#ff8800';      // Medium change - orange  
+            if (score > 0.2) return '#ffff00';      // Low change - yellow
+            return '#00ff00';                        // No change - green
+        }
+        
+        // Utility functions for TiTiler
+        function getBboxFromGeometry(geometry) {
+            const coords = geometry.coordinates[0];
+            const lons = coords.map(c => c[0]);
+            const lats = coords.map(c => c[1]);
+            return [
+                Math.min(...lons),
+                Math.min(...lats),
+                Math.max(...lons),
+                Math.max(...lats)
+            ];
+        }
+        
+        function getStacUrl(sceneId) {
+            return `https://earth-search.aws.element84.com/v1/collections/sentinel-2-l2a/items/${sceneId}`;
+        }
+        
+        // Test TiTiler availability
+        async function testTiTiler() {
+            try {
+                const response = await fetch(`${titilerUrl}/health`);
+                return response.ok;
+            } catch {
+                return false;
+            }
+        }
+        
+        // Handle chip selection
+        function selectChip(chip) {
+            const bbox = getBboxFromGeometry(chip.geometry);
+            const stacUrl = getStacUrl(chip.scene_id);
+            
+            // Use TiTiler STAC bbox endpoint
+            const thumbnailUrl = `${titilerUrl}/stac/bbox/${bbox.join(',')}/${256}x${256}.png?url=${encodeURIComponent(stacUrl)}&assets=visual`;
+            const fallbackUrl = `${titilerUrl}/stac/bbox/${bbox.join(',')}/${256}x${256}.png?url=${encodeURIComponent(stacUrl)}&assets=B04,B03,B02&rescale=0,3000`;
+            
+            // Update selection panel
+            selectedEl.innerHTML = `
+                <div class="chip-info">
+                    <strong>Selected Location</strong><br>
+                    <img src="${thumbnailUrl}" style="width: 100%; margin: 10px 0; border-radius: 3px;" onerror="this.src='${fallbackUrl}'; this.onerror=function(){this.style.display='none';}">
+                    ID: ${chip.id}<br>
+                    Geohash: ${chip.geohash}<br>
+                    Date: ${new Date(chip['@timestamp']).toLocaleDateString()}<br>
+                    Change Score: ${(chip.change_score || 0).toFixed(3)}<br>
+                    <button onclick="findSimilar('${chip.id}')" style="margin-top: 10px; padding: 5px 10px; background: #007cba; color: white; border: none; border-radius: 3px; cursor: pointer;">Find Similar</button>
+                </div>
+            `;
+            
+            // Show timeline
+            showTimeline(chip);
+        }
+        
+        // Show horizontal timeline
+        async function showTimeline(selectedChip) {
+            const timelineEl = document.getElementById('timeline');
+            const contentEl = document.getElementById('timeline-content');
+            
+            timelineEl.style.display = 'block';
+            contentEl.innerHTML = '<div style="padding: 20px; color: #666;">Loading time series...</div>';
+            
+            try {
+                const timeSeries = await getChipTimeSeries(selectedChip.geohash);
+                
+                contentEl.innerHTML = timeSeries.map(obs => {
+                    const bbox = getBboxFromGeometry(selectedChip.geometry);
+                    const stacUrl = getStacUrl(obs.scene_id);
+                    const thumbUrl = `${titilerUrl}/stac/bbox/${bbox.join(',')}/${120}x${120}.png?url=${encodeURIComponent(stacUrl)}&assets=visual`;
+                    const isSelected = obs.id === selectedChip.id;
+                    
+                    return `
+                        <div style="flex-shrink: 0; text-align: center; padding: 5px; border-radius: 5px; ${isSelected ? 'background: #e8f4f8; border: 2px solid #007cba;' : 'border: 1px solid #ddd;'}">
+                            <img src="${thumbUrl}" style="width: 120px; height: 120px; border-radius: 3px; display: block;" onerror="this.style.background='#f0f0f0'; this.alt='No preview';">
+                            <div style="font-size: 10px; margin-top: 5px;">${new Date(obs['@timestamp']).toLocaleDateString()}</div>
+                            <div style="font-size: 10px; color: ${getChangeColor(obs.change_score || 0)}; font-weight: bold;">Δ${(obs.change_score || 0).toFixed(3)}</div>
+                        </div>
+                    `;
+                }).join('');
+                
+                // Scroll to selected chip
+                const selectedIndex = timeSeries.findIndex(obs => obs.id === selectedChip.id);
+                if (selectedIndex > 0) {
+                    contentEl.scrollLeft = selectedIndex * 140;
+                }
+                
+            } catch (error) {
+                contentEl.innerHTML = '<div style="padding: 20px; color: #666;">Error loading time series</div>';
+            }
+        }
+        
+        // Get time series for a geohash location
+        async function getChipTimeSeries(geohash) {
+            try {
+                const query = {
+                    size: 100,
+                    query: {
+                        term: { geohash: geohash }
+                    },
+                    sort: [{ "@timestamp": { order: "asc" } }],
+                    _source: ["id", "scene_id", "@timestamp", "change_score"]
+                };
+                
+                const response = await fetch(OPENSEARCH_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Basic ' + btoa(MASTER_USER + ':' + MASTER_PASS)
+                    },
+                    body: JSON.stringify(query)
+                });
+                
+                const data = await response.json();
+                return data.hits.hits.map(hit => hit._source);
+            } catch (error) {
+                console.error('Error getting time series:', error);
+                return [];
+            }
+        }
+        
+        // Color code change scores
+        function getChangeColor(score) {
+            const changeScore = score || 0;
+            if (changeScore > 0.8) return '#ff0000';
+            if (changeScore > 0.5) return '#ff8800';
+            if (changeScore > 0.2) return '#ffaa00';
+            return '#666666';
+        }
+        
+        // Find similar chips using vector similarity
+        async function findSimilar(chipId) {
+            statusEl.textContent = 'Finding similar chips...';
+            statusEl.className = 'loading';
+            
+            try {
+                // First get the embedding for the selected chip
+                const getQuery = {
+                    query: { term: { id: chipId } },
+                    _source: ["embedding"]
+                };
+                
+                const getResponse = await fetch(OPENSEARCH_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Basic ' + btoa(MASTER_USER + ':' + MASTER_PASS)
+                    },
+                    body: JSON.stringify(getQuery)
+                });
+                
+                const getData = await getResponse.json();
+                if (!getData.hits.hits.length) {
+                    throw new Error('Chip not found');
+                }
+                
+                const embedding = getData.hits.hits[0]._source.embedding;
+                
+                // KNN similarity search
+                const similarQuery = {
+                    size: 50,
+                    query: {
+                        knn: {
+                            embedding: {
+                                vector: embedding,
+                                k: 50
+                            }
+                        }
+                    },
+                    _source: ["id", "scene_id", "@timestamp", "geohash", "change_score", "geometry"]
+                };
+                
+                const similarResponse = await fetch(OPENSEARCH_URL, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Basic ' + btoa(MASTER_USER + ':' + MASTER_PASS)
+                    },
+                    body: JSON.stringify(similarQuery)
+                });
+                
+                const similarData = await similarResponse.json();
+                displayChips(similarData.hits.hits);
+                
+                statusEl.textContent = 'Showing similar chips';
+                statusEl.className = '';
+                countEl.textContent = `Found ${similarData.hits.hits.length} similar chips`;
+                
+            } catch (error) {
+                console.error('Error finding similar chips:', error);
+                statusEl.textContent = 'Error finding similar chips';
+                statusEl.className = '';
+            }
+        }
+        
+        // Filter functions
+        function applyFilters() {
+            queryChips();
+        }
+        
+        function clearFilters() {
+            if (minDate && maxDate) {
+                selectedStartDate = minDate;
+                selectedEndDate = maxDate;
+                dateRangeEl.value = 0;
+                startDateLabelEl.textContent = minDate.toLocaleDateString();
+                endDateLabelEl.textContent = maxDate.toLocaleDateString();
+            }
+            minChangeEl.value = '0';
+            changeValueEl.textContent = '≥ 0.0';
+            sceneFilterEl.value = '';
+            queryChips();
+        }
+        
+        // Make functions global for onclick handlers
+        window.applyFilters = applyFilters;
+        window.clearFilters = clearFilters;
+        window.findSimilar = findSimilar;
+        
+        // Query chips when map moves
+        map.on('moveend', queryChips);
+        
+        // Initial load
+        initializeDateRange().then(() => {
+            queryChips();
+        });
+    </script>
+</body>
+</html>

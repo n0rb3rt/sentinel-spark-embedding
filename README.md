@@ -1,14 +1,17 @@
 # Sentinel-2 Chip Processing Pipeline with Clay GeoFM
 
-This project creates an AWS infrastructure for processing Sentinel-2 satellite imagery into 256px chips with temporal analysis and Clay GeoFM embeddings using EMR and PySpark.
+This project creates an AWS infrastructure for processing Sentinel-2 satellite imagery into 256px chips with temporal analysis, Clay GeoFM embeddings, change detection, and vector search using EMR, PySpark, and OpenSearch.
 
 ## Architecture
 
-- **EMR Cluster**: Spark cluster with Apache Sedona for geospatial processing
+- **EMR Cluster**: GPU-enabled Spark cluster with Apache Sedona for geospatial processing
 - **S3 Bucket**: Storage for Iceberg data and processed chips
 - **Glue Catalog**: Metadata store for Iceberg tables with geohash partitioning
+- **OpenSearch**: Vector database with KNN search for embeddings and geospatial queries
 - **Clay GeoFM**: Foundation model for generating embeddings from satellite imagery
-- **PySpark Jobs**: Extract chips from Sentinel-2 scenes and generate embeddings
+- **PySpark Jobs**: Complete pipeline from chip extraction to vector search ingestion
+
+![Architecture](docs/images/architecture_diagram.png)
 
 ## Development Setup
 
@@ -20,29 +23,18 @@ This project creates an AWS infrastructure for processing Sentinel-2 satellite i
 
 2. Install for development (includes PySpark for local testing):
    ```bash
-   # Auto-detect architecture and install dev dependencies
-   ./build.sh --dev
-   
-   # Or specify architecture explicitly
-   ./build.sh --dev --arch cuda    # For CUDA development
-   ./build.sh --dev --arch mps     # For Apple Silicon
-   ./build.sh --dev --arch cpu     # For CPU-only
+   # Install dev dependencies (specify architecture: cuda, mps, or cpu)
+   ./scripts/install.sh --arch cuda
    ```
 
 ## Production Build & Deployment
 
 1. Build distribution assets for deployment:
    ```bash
-   # Auto-detect architecture and create distribution
-   ./build.sh
-   
-   # Or specify target architecture
-   ./build.sh --arch cuda    # For EMR/GPU deployment
-   ./build.sh --arch cpu     # For CPU-only deployment
+   ./scripts/build.sh
    ```
 
    The build process:
-   - Downloads Clay model checkpoint and metadata
    - Builds Python wheel and packaged venv
    - Exports Clay model for target architecture
    - Creates dist/ directory with all deployment assets
@@ -76,7 +68,7 @@ uv run python src/sentinel_processing/jobs/chip_extraction.py \
 | `scl_mean` | float | SCL band mean for cloud filtering |
 | `clay_tensor` | binary | Compressed numpy arrays for Clay model input |
 | `geotiff` | binary | GeoTIFF blob for visualization |
-| `geometry` | binary | WKB polygon geometry |3
+| `geometry` | binary | WKB polygon geometry |
 
 ### 2. Generate Clay GeoFM embeddings:
 ```bash
@@ -89,13 +81,34 @@ uv run python src/sentinel_processing/jobs/embedding_generation.py \
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | string | Links back to source chip |
-| `scene_id` | string | Source Sentinel-2 scene identifier |
-| `datetime` | timestamp | Acquisition date and time of the imagery |
 | `geohash` | string | Geohash for spatial partitioning |
-| `geometry` | binary | WKB polygon geometry |
-| `global_embedding` | array<float> | 1024-dimensional Clay GeoFM embedding vector |
+| `datetime` | timestamp | Acquisition date and time of the imagery |
+| `embedding` | array<float> | 1024-dimensional Clay GeoFM embedding vector |
 | `model_version` | string | Clay model version used for embedding |
 | `created_at` | timestamp | Processing timestamp |
+
+### 3. Detect changes between time periods:
+```bash
+uv run python src/sentinel_processing/jobs/change_detection.py \
+  jobs.change_detection.input_table=embeddings \
+  jobs.change_detection.output_table=changes
+```
+
+**Output Table Schema (`changes`):**
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | string | Links back to source chip |
+| `geohash` | string | Geohash for spatial partitioning |
+| `datetime` | timestamp | Acquisition date and time of the imagery |
+| `change_score` | float | Cosine distance indicating change magnitude |
+| `created_at` | timestamp | Processing timestamp |
+
+### 4. Ingest to OpenSearch for vector search:
+```bash
+uv run python src/sentinel_processing/jobs/opensearch_ingestion.py
+```
+
+Ingests joined data from all three tables into OpenSearch with KNN vector index for similarity search and geospatial queries.
 
 ## Clay Foundation Model Results
 
@@ -127,13 +140,16 @@ sentinel-spark-embedding/
 ├── src/
 │   ├── infra/                      # CDK infrastructure modules
 │   │   ├── __init__.py
-│   │   ├── sentinel_stack.py       # Main CDK stack
-│   │   └── emr_gpu_stack.py        # EMR GPU cluster stack
+│   │   ├── stack.py                # Main CDK stack with centralized outputs
+│   │   ├── emr.py                  # EMR GPU cluster with RAPIDS support
+│   │   └── opensearch.py           # OpenSearch cluster for vector search
 │   └── sentinel_processing/        # Python package for data processing
 │       ├── jobs/
 │       │   ├── __init__.py
 │       │   ├── chip_extraction.py  # Sentinel-2 chip extraction job
-│       │   └── embedding_generation.py # Clay GeoFM embedding job
+│       │   ├── embedding_generation.py # Clay GeoFM embedding job
+│       │   ├── change_detection.py # Temporal change detection job
+│       │   └── opensearch_ingestion.py # Vector search ingestion job
 │       ├── lib/
 │       │   ├── __init__.py
 │       │   ├── sedona_utils.py     # Geospatial processing utilities
@@ -143,6 +159,8 @@ sentinel-spark-embedding/
 │       ├── config.py               # Configuration management
 │       └── config.yaml             # Default configuration
 ├── scripts/
+│   ├── build.sh                    # Build script with dev/production modes
+│   ├── install.sh                  # Development environment setup
 │   └── export_clay_model.py        # Clay model export utility
 ├── docker/
 │   └── Dockerfile.build            # Docker build configuration
@@ -152,7 +170,6 @@ sentinel-spark-embedding/
 │   └── pyspark_sedona_rasterio.ipynb # Development notebook
 ├── sample-geospatial-foundation-models-on-aws/ # Reference implementation
 ├── app.py                          # CDK app entry point
-├── build.sh                        # Build script with dev/production modes
 ├── pyproject.toml                  # Python package configuration
 ├── cdk.json                        # CDK configuration
 └── README.md
@@ -161,20 +178,20 @@ sentinel-spark-embedding/
 **Key Components:**
 - `.cache/`: Build cache for models, dependencies, and packaged environments
 - `dist/`: Production distribution assets created by `./build.sh`
-- `infra/`: CDK constructs for AWS resources (EMR, S3, Glue)
-- `jobs/`: Main processing jobs for chip extraction and embedding generation
+- `infra/`: CDK constructs for AWS resources (EMR, S3, Glue, OpenSearch)
+- `jobs/`: Complete processing pipeline from chip extraction to vector search ingestion
 - `lib/`: Utility modules for geospatial processing, raster handling, and Clay model integration
-- `build.sh`: Unified build script supporting dev mode (`--dev`) and production builds
+- `scripts/`: Build and setup scripts for development and production
 - `config.py/config.yaml`: Configuration management with CLI override support
 
 ## Build Modes
 
-**Development Mode** (`./build.sh --dev`):
+**Development Setup** (`./scripts/install.sh`):
+- Downloads Clay model and sets up development environment
 - Installs editable package with dev dependencies (includes PySpark)
-- Skips distribution asset creation for faster builds
 - Ideal for local development and testing
 
-**Production Mode** (`./build.sh`):
+**Production Build** (`./scripts/build.sh`):
 - Creates packaged venv, wheel, and source distribution
 - Exports Clay model for target architecture
 - Generates complete `dist/` directory for deployment

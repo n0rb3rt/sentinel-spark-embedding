@@ -20,7 +20,7 @@ def main():
     start_date = CONFIG.jobs.chip_extraction.start_date
     end_date = CONFIG.jobs.chip_extraction.end_date
     bands = CONFIG.sentinel.bands
-    table_name = "chips"
+    table_name = CONFIG.jobs.chip_extraction.output_table
 
     # Create Spark session
     spark = create_sedona_session("SentinelChipExtraction")
@@ -66,14 +66,9 @@ def main():
             .withColumn("chip_wkb", expr("ST_AsBinary(chip_geometry)")) \
             .drop("scene_geom", "chip_geometry") \
             .repartition("scene_id", "datetime")
-            
         
         total_pairs = scene_chip_pairs.count()
         print(f"Found {total_pairs:,} scene-chip pairs to process")
-        
-        # 4. Process chips with tensor-optimized Clay processing
-        print(f"Processing {total_pairs:,} scene-chip pairs...")
-        processing_start = time.time()
         
         normalized_chips = scene_chip_pairs.groupBy("scene_id", "datetime", "region_id") \
             .applyInPandas(
@@ -81,29 +76,24 @@ def main():
                 SceneChipProcessor.schema
             ).sortWithinPartitions("geohash", "id", "datetime") \
             .withColumn("created_at", current_timestamp())
-        
-        processing_time = time.time() - processing_start
-        print(f"Chip processing completed in {processing_time / 60:.1f}m")
 
         spark.sql("CREATE DATABASE IF NOT EXISTS sentinel")
 
         # Create table with partition transforms using SQL
         schema_ddl = normalized_chips._jdf.schema().toDDL()
+        database_name = CONFIG.sentinel.database_name
         spark.sql(f"""
-            CREATE OR REPLACE TABLE sentinel.{table_name} (
+            CREATE OR REPLACE TABLE {database_name}.{table_name} (
                 {schema_ddl}
             ) USING iceberg
             PARTITIONED BY (truncate(geohash, 4), month(datetime))
             TBLPROPERTIES (
-                'format-version'='2',
-                'write.target-file-size-bytes'='134217728',
-                'write.parquet.compression-codec'='zstd',
                 'write.sort-order'='geohash,id,datetime'
             )
         """)
         
         # Write to Iceberg table
-        normalized_chips.writeTo(f"sentinel.{table_name}").append()
+        normalized_chips.writeTo(f"{database_name}.{table_name}").append()
         
         total_time = time.time() - start_time
         print(f"Chip extraction completed in {total_time / 60:.1f}m")
