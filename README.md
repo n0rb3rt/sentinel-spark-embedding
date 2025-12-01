@@ -128,9 +128,6 @@ Analysis of the most important spectral features learned by the Clay model. This
 
 ```
 sentinel-spark-embedding/
-├── cdk.out/                        # CDK deployment artifacts
-├── checkpoints/                    # Spark checkpoint directory
-│   └── compiled/
 ├── docker/
 │   └── Dockerfile.build            # Docker build configuration
 ├── docs/
@@ -140,10 +137,6 @@ sentinel-spark-embedding/
 │       └── top_features.png
 ├── notebooks/
 │   └── pyspark_sedona_rasterio.ipynb # Development notebook
-├── sample-geospatial-foundation-models-on-aws/ # Reference implementation
-│   ├── assets/                     # Demo assets and diagrams
-│   ├── sagemaker_pipelines/        # SageMaker pipeline examples
-│   └── ui/                         # Demo UI components
 ├── scripts/
 │   ├── build.sh                    # Build script with dev/production modes
 │   └── install.sh                  # Development environment setup
@@ -177,17 +170,8 @@ sentinel-spark-embedding/
 ├── app.py                          # CDK app entry point
 ├── cdk.json                        # CDK configuration
 ├── pyproject.toml                  # Python package configuration
-├── uv.lock                         # UV dependency lock file
 └── README.md
 ```
-
-**Key Components:**
-- `src/infra/`: Modular CDK constructs for AWS resources (EMR, S3, Glue, OpenSearch, VPC)
-- `src/sentinel_processing/jobs/`: Complete processing pipeline from chip extraction to vector search
-- `src/sentinel_processing/lib/`: Utility modules for geospatial processing, raster handling, and Clay model integration
-- `scripts/`: Build and setup scripts for development and production environments
-- `checkpoints/`: Spark checkpoint directory for fault tolerance
-- `sample-geospatial-foundation-models-on-aws/`: Reference implementation and examples
 
 ## Build Modes
 
