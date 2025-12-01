@@ -128,21 +128,34 @@ Analysis of the most important spectral features learned by the Clay model. This
 
 ```
 sentinel-spark-embedding/
-├── .cache/                         # Build cache directory
-│   ├── model/                      # Clay model checkpoint and exports
-│   ├── pip/                        # pip cache for faster builds
-│   └── venvs/                      # Cached packaged environments
-├── dist/                           # Distribution assets (production builds)
-│   ├── venv/venv.tar.gz           # Packaged Python environment
-│   ├── lib/*.whl                   # Python wheel
-│   ├── model/                      # Exported Clay models
-│   └── src/                        # Source code
+├── cdk.out/                        # CDK deployment artifacts
+├── checkpoints/                    # Spark checkpoint directory
+│   └── compiled/
+├── docker/
+│   └── Dockerfile.build            # Docker build configuration
+├── docs/
+│   └── images/                     # Architecture diagrams and visualizations
+│       ├── architecture_diagram.png
+│       ├── input_vs_embedding.png
+│       └── top_features.png
+├── notebooks/
+│   └── pyspark_sedona_rasterio.ipynb # Development notebook
+├── sample-geospatial-foundation-models-on-aws/ # Reference implementation
+│   ├── assets/                     # Demo assets and diagrams
+│   ├── sagemaker_pipelines/        # SageMaker pipeline examples
+│   └── ui/                         # Demo UI components
+├── scripts/
+│   ├── build.sh                    # Build script with dev/production modes
+│   └── install.sh                  # Development environment setup
 ├── src/
 │   ├── infra/                      # CDK infrastructure modules
 │   │   ├── __init__.py
 │   │   ├── stack.py                # Main CDK stack with centralized outputs
-│   │   ├── emr.py                  # EMR GPU cluster with RAPIDS support
-│   │   └── opensearch.py           # OpenSearch cluster for vector search
+│   │   ├── emr.py                  # EMR GPU cluster configuration
+│   │   ├── opensearch.py           # OpenSearch cluster for vector search
+│   │   ├── permissions.py          # IAM roles and policies
+│   │   ├── storage.py              # S3 buckets and Glue catalog
+│   │   └── vpc.py                  # VPC and networking configuration
 │   └── sentinel_processing/        # Python package for data processing
 │       ├── jobs/
 │       │   ├── __init__.py
@@ -152,37 +165,29 @@ sentinel-spark-embedding/
 │       │   └── opensearch_ingestion.py # Vector search ingestion job
 │       ├── lib/
 │       │   ├── __init__.py
-│       │   ├── sedona_utils.py     # Geospatial processing utilities
+│       │   ├── clay_utils.py       # Clay model integration
+│       │   ├── emr_utils.py        # EMR job utilities
 │       │   ├── raster_utils.py     # Raster processing and chip extraction
-│       │   └── clay_utils.py       # Clay model integration
+│       │   └── sedona_utils.py     # Geospatial processing utilities
 │       ├── __init__.py
 │       ├── config.py               # Configuration management
 │       └── config.yaml             # Default configuration
-├── scripts/
-│   ├── build.sh                    # Build script with dev/production modes
-│   ├── install.sh                  # Development environment setup
-│   └── export_clay_model.py        # Clay model export utility
-├── docker/
-│   └── Dockerfile.build            # Docker build configuration
-├── docs/
-│   └── images/                     # Documentation images
-├── notebooks/
-│   └── pyspark_sedona_rasterio.ipynb # Development notebook
-├── sample-geospatial-foundation-models-on-aws/ # Reference implementation
+├── web/
+│   └── index.html                  # Simple web interface
 ├── app.py                          # CDK app entry point
-├── pyproject.toml                  # Python package configuration
 ├── cdk.json                        # CDK configuration
+├── pyproject.toml                  # Python package configuration
+├── uv.lock                         # UV dependency lock file
 └── README.md
 ```
 
 **Key Components:**
-- `.cache/`: Build cache for models, dependencies, and packaged environments
-- `dist/`: Production distribution assets created by `./build.sh`
-- `infra/`: CDK constructs for AWS resources (EMR, S3, Glue, OpenSearch)
-- `jobs/`: Complete processing pipeline from chip extraction to vector search ingestion
-- `lib/`: Utility modules for geospatial processing, raster handling, and Clay model integration
-- `scripts/`: Build and setup scripts for development and production
-- `config.py/config.yaml`: Configuration management with CLI override support
+- `src/infra/`: Modular CDK constructs for AWS resources (EMR, S3, Glue, OpenSearch, VPC)
+- `src/sentinel_processing/jobs/`: Complete processing pipeline from chip extraction to vector search
+- `src/sentinel_processing/lib/`: Utility modules for geospatial processing, raster handling, and Clay model integration
+- `scripts/`: Build and setup scripts for development and production environments
+- `checkpoints/`: Spark checkpoint directory for fault tolerance
+- `sample-geospatial-foundation-models-on-aws/`: Reference implementation and examples
 
 ## Build Modes
 
